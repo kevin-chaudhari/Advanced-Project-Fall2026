@@ -1,0 +1,51 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #F7F9FC;
+  --surface: #FFFFFF;
+  --primary: #2563EB;
+  --secondary: #06B6D4;
+  --success: #16A34A;
+  --warning: #F59E0B;
+  --danger: #DC2626;
+  --text: #0F172A;
+  --muted: #64748B;
+  --border: #E2E8F0;
+  /* data-viz series (validated: REAL vs SYNTHETIC) */
+  --series-real: #2563EB;
+  --series-synthetic: #0891B2;
+  --series-neutral: #94A3B8;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  .card { @apply bg-surface border border-line rounded-xl shadow-card; }
+  .card-pad { @apply p-5; }
+  .section-title { @apply text-[13px] font-semibold text-ink tracking-tight; }
+  .eyebrow { @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-muted; }
+  .chip { @apply inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-semibold border; }
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed; }
+  .btn-primary { @apply btn bg-primary-600 text-white hover:bg-primary-700; }
+  .btn-ghost { @apply btn text-muted hover:text-ink hover:bg-slate-100; }
+  .input { @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-sm outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-100; }
+  .mono { @apply font-mono text-[12px]; }
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes pulseDot { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+.pulse-dot { animation: pulseDot 1.4s ease-in-out infinite; }

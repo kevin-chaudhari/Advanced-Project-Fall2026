@@ -1,0 +1,185 @@
+{
+  "generator_version": "v1",
+  "knowledge_base": {
+    "records": 6350,
+    "checks": {
+      "Temperature_range": {
+        "min": 15.0,
+        "max": 113.7,
+        "bounds": [
+          15.0,
+          125.0
+        ],
+        "ok": true,
+        "missing_rate": 0.03811023622047244
+      },
+      "Vibration_range": {
+        "min": 0.0,
+        "max": 0.968,
+        "bounds": [
+          0.0,
+          1.0
+        ],
+        "ok": true,
+        "missing_rate": 0.03480314960629921
+      },
+      "Pressure_range": {
+        "min": 15.0,
+        "max": 100.0,
+        "bounds": [
+          15.0,
+          100.0
+        ],
+        "ok": true,
+        "missing_rate": 0.03622047244094488
+      },
+      "RPM_range": {
+        "min": 0.0,
+        "max": 4199.0,
+        "bounds": [
+          0.0,
+          4950.0
+        ],
+        "ok": true,
+        "missing_rate": 0.0
+      },
+      "Current_range": {
+        "min": 6.2,
+        "max": 148.3,
+        "bounds": [
+          3.0,
+          150.0
+        ],
+        "ok": true,
+        "missing_rate": 0.03496062992125984
+      },
+      "Voltage_range": {
+        "min": 192.4,
+        "max": 480.0,
+        "bounds": [
+          100.0,
+          480.0
+        ],
+        "ok": true,
+        "missing_rate": 0.03322834645669291
+      },
+      "Flow_Rate_range": {
+        "min": 0.0,
+        "max": 199.7,
+        "bounds": [
+          0.0,
+          200.0
+        ],
+        "ok": true,
+        "missing_rate": 0.03732283464566929
+      },
+      "operating_hours": {
+        "min": 1522,
+        "max": 56040,
+        "ok": true
+      },
+      "duplicate_rate": 0.0,
+      "all_marked_synthetic": true
+    },
+    "label_distribution": {
+      "Normal Operation": 1000,
+      "Seal Failure": 903,
+      "Bearing Wear": 803,
+      "Gearbox Degradation": 732,
+      "Pump Cavitation": 728,
+      "Lubrication Degradation": 712,
+      "Rotor Imbalance": 587,
+      "Sensor Malfunction": 300,
+      "Cooling System Failure": 233,
+      "Electrical Overload": 183,
+      "Valve Blockage": 169
+    },
+    "scenario_family_distribution": {
+      "normal": 1000,
+      "missing": 700,
+      "seal": 600,
+      "gearbox": 600,
+      "pump": 600,
+      "ambiguous": 600,
+      "bearing": 450,
+      "shaft": 450,
+      "lubrication": 450,
+      "mixed": 300,
+      "contradictory": 300,
+      "cooling": 100,
+      "electrical": 100,
+      "valve": 100
+    },
+    "severity_distribution": {
+      "Medium": 2950,
+      "Low": 1350,
+      "High": 1050,
+      "None": 1000
+    },
+    "overall_missing_value_rate": 0.030663667041619797,
+    "relationship_checks": {
+      "bearing_vibration_gt_normal": true,
+      "bearing_temperature_gt_normal": true,
+      "imbalance_temperature_lt_bearing": true,
+      "seal_pressure_lt_normal": true,
+      "cavitation_flow_lt_normal": true,
+      "lubrication_temperature_gt_normal": true,
+      "gearbox_only_on_gear_contexts": true,
+      "lubrication_maintenance_delay_gt_normal": true
+    },
+    "all_checks_passed": true
+  },
+  "test_scenarios": {
+    "cases": 246,
+    "by_category": {
+      "clear_fault": 94,
+      "real_afrb_holdout": 70,
+      "normal_equipment": 15,
+      "missing_temperature": 12,
+      "conflicting_signals": 12,
+      "no_historical_match": 12,
+      "ambiguous_failure": 12,
+      "mixed_symptoms": 10,
+      "contradictory_sensors": 9
+    }
+  },
+  "gap_analysis": {
+    "records": 50000,
+    "label_distribution": {
+      "Electrical Overload": 7250,
+      "Sensor Malfunction": 7239,
+      "Valve Blockage": 7157,
+      "Cooling System Failure": 7136,
+      "Bearing Wear": 7136,
+      "Lubrication Degradation": 7043,
+      "Rotor Imbalance": 7039
+    },
+    "difficulty_distribution": {
+      "Easy": 29842,
+      "Medium": 15168,
+      "Hard": 4990
+    },
+    "human_intervention_rate": 0.09922,
+    "missing_value_rate_per_sensor": {
+      "Temperature": 0.0,
+      "Vibration": 0.0,
+      "Pressure": 0.0,
+      "RPM": 0.0,
+      "Current": 0.0,
+      "Voltage": 0.0,
+      "Flow_Rate": 0.0
+    },
+    "system_contexts": 25,
+    "label_context_dependence": "none observed (contexts are uniformly distributed across labels)",
+    "gaps_identified": [
+      "No normal-operation / no-fault class: every record is a failure",
+      "No missing sensor values at all (0% missing)",
+      "No seal-failure, pump-cavitation or gearbox-specific degradation scenarios",
+      "No severity gradation (mild / moderate / severe)",
+      "No physically contradictory sensor combinations",
+      "No explicit mixed-symptom (co-occurring fault) cases",
+      "No 'no historical match' situations to test abstention",
+      "No asset metadata such as operating hours / maintenance interval / component"
+    ]
+  }
+}

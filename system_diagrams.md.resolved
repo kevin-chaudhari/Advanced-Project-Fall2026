@@ -1,0 +1,594 @@
+# 🏭 Industrial Diagnostic AI System — Complete Technical Diagrams
+
+---
+
+## 1. High-Level System Architecture
+
+```mermaid
+graph TB
+    subgraph CLIENT["🖥️ Client Layer — React 18 + Vite (Port 5173)"]
+        LP[LandingPage\nDataset Selection]
+        CP[ChatPage\nDiagnostic Chat Interface]
+        AD[AnalysisDashboard\nPerformance Analytics]
+        API_JS[api.js\nAxios HTTP Client]
+    end
+
+    subgraph BACKEND["⚙️ Backend Layer — FastAPI + Uvicorn (Port 8000)"]
+        MAIN[main.py\nFastAPI App + CORS + Lifespan]
+        subgraph ROUTES["REST Endpoints"]
+            R1[GET /health]
+            R2[POST /load-data]
+            R3[POST /query]
+            R4[GET /analyses]
+            R5[GET /analyses/agent-report]
+            R6[POST /rebuild-index]
+            R7[GET /index-status]
+        end
+    end
+
+    subgraph AICORE["🧠 AI/ML Core"]
+        subgraph RAG["RAG Pipeline"]
+            EMB[Embedder\nall-MiniLM-L6-v2]
+            FAISS[FAISSStore\nDual Flat-L2 Indexes]
+            RET[Retriever\nTop-K Semantic Search]
+        end
+        subgraph AGENTS["6-Agent Orchestrator"]
+            ORCH[AgentOrchestrator]
+        end
+        LLM[LLMClient\nOllama / OpenAI / Fallback]
+    end
+
+    subgraph DATA["💾 Data & Storage Layer"]
+        FIQ[FailureIQ Dataset\nCSV + Synthetic]
+        AFRB[AFRB Dataset\nCSV Upload]
+        FIDX[faiss_indexes/\n.faiss + .pkl]
+        SQLDB[SQLite DB\nanalysis_store.db]
+        UPLOADS[uploads/\nUser CSVs]
+    end
+
+    LP -->|navigate /chat/:dataset| CP
+    LP -->|navigate /analysis| AD
+    CP --> API_JS
+    AD --> API_JS
+    API_JS -->|HTTP/JSON| MAIN
+    MAIN --> ROUTES
+    R3 --> FAISS
+    R3 --> ORCH
+    R2 --> FIQ
+    R2 --> AFRB
+    FAISS --> FIDX
+    ORCH --> LLM
+    FIQ --> EMB --> FAISS
+    AFRB --> EMB
+    MAIN --> SQLDB
+    AFRB --> UPLOADS
+```
+
+---
+
+## 2. End-to-End Query Execution Pipeline
+
+```mermaid
+flowchart TD
+    A([👤 User Enters Diagnostic Question]) --> B[ChatPage.jsx\nhandleSubmit]
+    B --> C[api.js\nPOST /query]
+    C --> D{Dataset Loaded?\nFAISS Index Ready?}
+    D -->|No| E[❌ HTTP 400\nLoad dataset first]
+    D -->|Yes| F[FAISSStore.search\nEmbed query via all-MiniLM-L6-v2]
+    F --> G[Top-K Semantic Retrieval\nL2 Distance → Similarity Score]
+    G --> H[BaseAgent.format_context\nFormat retrieved docs as numbered list]
+
+    H --> I{PHASE 1 — asyncio.gather}
+    I --> J[🧠 DiagnosticExpertAgent\n≥3 Hypotheses + Evidence Scoring]
+    I --> K[⚡ AggressiveDecisionAgent\nHeuristic Threshold Rules]
+    I --> L[🔍 PatternRecognitionAgent\nFAISS Pattern + Trend Analysis]
+
+    J --> M[evaluate_phase1\nLLM-as-a-Judge ×3 parallel]
+    K --> M
+    L --> M
+    M --> N[Phase 1 Score + Recommendations]
+
+    N --> O[PHASE 2 — ✅ VerificationAnalyst\nCross-validate + Resolve Contradictions]
+    O --> P[evaluate_phase2\nLLM Judge + Contradiction Bonus]
+    P --> Q[Phase 2 Score + Improvement Delta]
+
+    Q --> R[PHASE 3 — 🎯 AmbiguityDetectionAgent\nConfidence Calibration + Risk Score]
+    R --> S[evaluate_phase3\nLLM Judge + Calibration Bonus]
+    S --> T{Human Review\nRequired?}
+    T -->|Yes| U[🚨 Flag: ambiguity=true]
+    T -->|No| V[✅ Proceed]
+    U --> W
+    V --> W
+
+    W[PHASE 4 — 🏁 HumanReviewCoordinator\nFinal Synthesis + Structured JSON Output]
+    W --> X[evaluate_phase4\nLLM Judge + Confidence Weighting]
+    X --> Y[build_pipeline_test_summary\nAggregate 4-Phase Score]
+
+    Y --> Z[PHASE 5 — SystemAnalysisAgent\nMeta-evaluation + InlineEvaluationReport]
+    Z --> AA[_bg_save_analysis\nBackground: persist to SQLite]
+    Z --> AB[QueryResponse JSON\nfinal_diagnosis, confidence,\nreasoning, agent_outputs,\nanalysis_report, phase_test_results]
+    AB --> AC[ChatPage renders\nDiagnosisCard + AgentContributions\n+ PhaseTestPanel + ConfidenceBar]
+    AC --> AD2([✅ User sees structured result])
+```
+
+---
+
+## 3. Multi-Agent Pipeline — Detailed Interaction Diagram
+
+```mermaid
+sequenceDiagram
+    participant ORC as AgentOrchestrator
+    participant DE as 🧠 DiagnosticExpert
+    participant AD as ⚡ AggressiveDecision
+    participant PR as 🔍 PatternRecognition
+    participant PE as 📊 PhaseEvaluator
+    participant VA as ✅ VerificationAnalyst
+    participant AM as 🎯 AmbiguityDetection
+    participant HC as 🏁 HumanReviewCoord
+    participant SA as 🔬 SystemAnalysis
+    participant LLM as 🤖 LLMClient
+
+    ORC->>DE: run(question, context)
+    ORC->>AD: run(question, context)
+    ORC->>PR: run(question, context, retrieval_scores)
+    Note over DE,PR: Phase 1 — asyncio.gather (parallel)
+
+    DE->>LLM: generate(hypotheses_prompt)
+    AD->>LLM: generate(heuristic_prompt)
+    PR->>LLM: generate(pattern_prompt)
+    LLM-->>DE: JSON {hypotheses, primary_hypothesis, confidence}
+    LLM-->>AD: JSON {decision, heuristic_rules, immediate_action}
+    LLM-->>PR: JSON {patterns, dominant_failure_signature, trend_analysis}
+
+    DE-->>ORC: diag_result
+    AD-->>ORC: aggr_result
+    PR-->>ORC: pattern_result
+
+    ORC->>PE: evaluate_phase1(diag, aggr, pattern, context)
+    PE->>LLM: judge(faithfulness) × 3 parallel
+    PE->>LLM: judge(reasoning) × 3 parallel
+    PE->>LLM: judge(coverage) × 3 parallel
+    PE->>LLM: judge(hallucination) × 3 parallel
+    PE->>LLM: judge(agreement) × 3 parallel
+    PE-->>ORC: phase1_eval {score, verdict, recommendations}
+
+    ORC->>VA: run(question, context, {phase1 agents + phase1_test})
+    VA->>LLM: generate(verification_prompt)
+    LLM-->>VA: JSON {agreements, contradictions_resolved, verified_diagnosis}
+    VA-->>ORC: ver_result
+
+    ORC->>PE: evaluate_phase2(ver_result, phase1_evals, context)
+    PE-->>ORC: phase2_eval
+
+    ORC->>AM: run(question, context, {verification + phase2_test})
+    AM->>LLM: generate(ambiguity_prompt)
+    LLM-->>AM: JSON {conflicts, overall_confidence, human_review_required}
+    AM-->>ORC: amb_result
+
+    ORC->>PE: evaluate_phase3(amb_result, phase2_eval, context)
+    PE-->>ORC: phase3_eval
+
+    ORC->>HC: run(question, context, {all agents + phase3_test})
+    HC->>LLM: generate(synthesis_prompt)
+    LLM-->>HC: JSON {final_diagnosis, confidence, reasoning, supporting_evidence}
+    HC-->>ORC: final_result
+
+    ORC->>PE: evaluate_phase4(final_result, phase3_eval, all_evals, context)
+    PE-->>ORC: phase4_eval + pipeline_test_summary
+
+    ORC->>SA: run(question, context, {all agent results + latency})
+    SA->>LLM: generate(system_analysis_prompt)
+    LLM-->>SA: AnalysisReport {retrieval, agents, final, hallucination, confidence, aggregated}
+    SA-->>ORC: analysis_report
+
+    ORC-->>ORC: recalibrate confidence from analysis_report
+    ORC-->>ORC: build agent_outputs list (6 IndividualAgentOutput)
+```
+
+---
+
+## 4. RAG (Retrieval-Augmented Generation) Workflow
+
+```mermaid
+flowchart LR
+    subgraph INGEST["📥 Index Build (Startup / POST /load-data)"]
+        direction TB
+        CSV1[FailureSensorIQ CSV\n500 rows sampled + 30 synthetic]
+        CSV2[AFRB CSV\nAll columns → text doc]
+        PARSE[Row → Structured Text\nequipment, failure_mode,\nsensors, severity, action]
+        EMB1[Embedder\nSentenceTransformer\nall-MiniLM-L6-v2\n384-dim vectors]
+        IDX[FAISS IndexFlatL2\nadd embeddings]
+        DISK[faiss_indexes/\nfailure_iq.faiss\nafrb.faiss\n*.pkl doc store]
+        CSV1 --> PARSE --> EMB1 --> IDX --> DISK
+        CSV2 --> PARSE
+    end
+
+    subgraph QUERY["🔍 Query Time (POST /query)"]
+        direction TB
+        Q[User Question] --> QEMB[Embed Query\n1×384 vector]
+        QEMB --> SEARCH[FAISS.search\nL2 distance top-k]
+        SEARCH --> SCORE[score = 1/(1+dist)\n0→1 similarity]
+        SCORE --> DOCS[Top-K Documents\n{content, metadata, score}]
+        DOCS --> CTX[BaseAgent.format_context\nNumbered text blocks]
+    end
+
+    DISK -->|_load on startup| SEARCH
+    CTX -->|Retrieved Context| AGENTS[6 AI Agents\nuse context as evidence]
+```
+
+---
+
+## 5. LLM Client — Decision & Fallback Architecture
+
+```mermaid
+flowchart TD
+    CALL[Agent calls\nllm_client.generate] --> PROV{LLM_PROVIDER\nenv var}
+
+    PROV -->|openai| KEYCHECK{API Key\nset & valid?}
+    KEYCHECK -->|No| MOCK
+    KEYCHECK -->|Yes| OAI[POST openai/chat/completions\ngpt-4o / gpt-4o-mini\nJSON mode + 8192 tokens\ntemp=0.2]
+    OAI -->|HTTP Error / Timeout| MOCK
+    OAI -->|Success| PARSE
+
+    PROV -->|ollama| OLL[POST ollama/api/generate\nllama3 / mistral\nstream=false\nnum_predict=1024]
+    OLL -->|ConnectError / Empty| MOCK
+    OLL -->|Success| PARSE
+
+    MOCK[Rule-Based Fallback Engine\n_build_agent_mock\nDetect agent from prompt keywords\nGenerate schema-correct JSON\nKeyword → diagnosis mapping:\nvibration→Bearing Wear\ntemp→Thermal Degradation\npressure→Cavitation\nbearing→Lubrication Fail\nelectrical→Winding Fault\nsensor→Anomaly] --> PARSE
+
+    PARSE[extract_json\n1.Direct json.loads\n2.Markdown fence regex\n3.Brace-depth scanner] --> RESULT[Dict returned\nto calling Agent]
+```
+
+---
+
+## 6. Database Schema & Persistence Flow
+
+```mermaid
+erDiagram
+    ANALYSIS_RESULTS {
+        INTEGER id PK
+        TEXT created_at
+        TEXT question
+        TEXT dataset
+        TEXT final_diagnosis
+        REAL confidence
+        REAL latency_ms
+        REAL overall_score
+        TEXT risk_level
+        TEXT analysis_json
+    }
+
+    FAISS_INDEX_STORE {
+        FILE failure_iq_faiss "384-dim L2 index"
+        FILE failure_iq_docs_pkl "List of doc dicts"
+        FILE afrb_faiss "384-dim L2 index"
+        FILE afrb_docs_pkl "List of doc dicts"
+    }
+
+    ANALYSIS_RESULTS ||--o{ INLINE_EVALUATION : "analysis_json contains"
+    INLINE_EVALUATION {
+        TEXT reference_conclusion
+        FLOAT faithfulness_score
+        FLOAT reasoning_score
+        FLOAT agreement_score
+        FLOAT coverage_score
+        FLOAT hallucination_rate
+        FLOAT confidence_final
+        TEXT final_verdict
+        LIST per_agent_evaluations
+    }
+
+    INLINE_EVALUATION ||--|{ AGENT_GROUNDING_EVAL : "per_agent_evaluations[]"
+    AGENT_GROUNDING_EVAL {
+        TEXT agent_key
+        FLOAT faithfulness_score
+        FLOAT reasoning_score
+        FLOAT agreement_score
+        FLOAT coverage_score
+        FLOAT hallucination_rate
+        FLOAT reliability_score
+        TEXT verdict
+    }
+```
+
+---
+
+## 7. Frontend Routing & Component Hierarchy
+
+```mermaid
+graph TD
+    subgraph ROUTER["React Router DOM"]
+        ROOT[/ → LandingPage]
+        CHAT[/chat/:dataset → ChatPage]
+        DASH[/analysis → AnalysisDashboard]
+        WILD[/* → Navigate /]
+    end
+
+    subgraph LANDING["LandingPage.jsx"]
+        DC[DatasetCard\nfailure_iq / afrb]
+        HERO[Hero Section\nSystem Overview]
+    end
+
+    subgraph CHATPAGE["ChatPage.jsx"]
+        SB[Sidebar\nDataset controls\nFile upload\nIndex status]
+        MSGS[Message List\nAnimatePresence]
+        INPUT[Textarea + Send Button]
+        CMSG[ChatMessage.jsx\nuser/assistant/error]
+        DCARD[DiagnosisCard.jsx\nfinal_diagnosis\ndirect_answer]
+        CB[ConfidenceBar.jsx\nAnimated progress]
+        RA[ReasoningAccordion.jsx\nStep-by-step reasoning]
+        AC[AgentContributions.jsx\n6-agent summary]
+        PO[PersonaOutputs.jsx\nDetailed per-agent cards]
+        PTP[PhaseTestPanel.jsx\nPhase 1-4 scores\nLLM judge details]
+        LS[LoadingSpinner.jsx\nPipeline animation]
+    end
+
+    subgraph DASHBOARD["AnalysisDashboard.jsx"]
+        APR[AgentPerformanceReport.jsx\nTrait scores\nBaseline vs Actual\nPer-question breakdown]
+        HIST[Analysis History\nSQLite records table]
+    end
+
+    ROOT --> DC --> CHAT
+    ROOT --> HERO
+    CHAT --> SB
+    CHAT --> MSGS
+    CHAT --> INPUT
+    MSGS --> CMSG
+    CMSG -->|assistant role| DCARD
+    DCARD --> CB
+    DCARD --> RA
+    DCARD --> AC
+    DCARD --> PO
+    DCARD --> PTP
+    MSGS -->|loading| LS
+    DASH --> APR
+    DASH --> HIST
+```
+
+---
+
+## 8. API Communication Flow
+
+```mermaid
+sequenceDiagram
+    participant UI as React Frontend
+    participant AX as api.js (Axios)
+    participant FA as FastAPI Backend
+    participant DB as SQLite DB
+
+    Note over UI,DB: Startup Health Check
+    UI->>AX: checkHealth()
+    AX->>FA: GET /health
+    FA-->>AX: {status, failure_iq_loaded, afrb_loaded}
+    AX-->>UI: Update dataStatus state
+
+    Note over UI,DB: Dataset Load
+    UI->>AX: loadDataset('failure_iq')
+    AX->>FA: POST /load-data?dataset_type=failure_iq
+    FA->>FA: Check disk cache → load or build FAISS
+    FA-->>AX: {success, documents_loaded, message}
+    AX-->>UI: setDataStatus({loaded: true})
+
+    Note over UI,DB: AFRB CSV Upload
+    UI->>AX: loadDataset('afrb', File)
+    AX->>FA: POST /load-data?dataset_type=afrb\n(multipart/form-data)
+    FA->>FA: Save file to uploads/ → build FAISS
+    FA-->>AX: {success, documents_loaded}
+
+    Note over UI,DB: Diagnostic Query (main flow)
+    UI->>AX: sendQuery(question, 'failure_iq', 5)
+    AX->>FA: POST /query {question, dataset_type, top_k}
+    FA->>FA: FAISS.search → 6-agent pipeline → evaluation
+    FA->>DB: BackgroundTask: save_analysis()
+    FA-->>AX: QueryResponse (full JSON)
+    AX-->>UI: Render DiagnosisCard + Panels
+
+    Note over UI,DB: Analytics Dashboard
+    UI->>AX: getAnalyses(50)
+    AX->>FA: GET /analyses?limit=50
+    FA->>DB: SELECT * FROM analysis_results
+    DB-->>FA: rows
+    FA-->>AX: {records, count}
+
+    UI->>AX: getAgentReport(200)
+    AX->>FA: GET /analyses/agent-report
+    FA->>DB: get_agent_aggregates()
+    FA-->>AX: Per-agent trait + metric aggregates
+    AX-->>UI: Render AgentPerformanceReport
+```
+
+---
+
+## 9. Agent Persona & Evaluation Framework
+
+```mermaid
+graph TB
+    subgraph PERSONAS["6 Agent Personas — Trait Matrix"]
+        DE["🧠 Dr. Elena Vasquez\nDiagnostic Expert\nAnalytical Depth: 10/10\nEvidence Rigor: 10/10\nSpeed: 4/10"]
+        PR["🔍 Dr. Aisha Patel\nPattern Recognition\nPattern Matching: 10/10\nEvidence Rigor: 7/10\nSpeed: 6/10"]
+        AD["⚡ Commander Marcus Chen\nAggressive Decision\nSpeed: 10/10\nDecision Confidence: 10/10\nAnalytical Depth: 4/10"]
+        VA["✅ Priya Raman\nVerification Analyst\nEvidence Rigor: 10/10\nRisk Awareness: 9/10\nAnalytical Depth: 9/10"]
+        AM["🎯 Dr. Sofia Nakamura\nAmbiguity Detection\nUncertainty Handling: 10/10\nRisk Awareness: 10/10\nDecision Confidence: 3/10"]
+        HC["🏁 Director Sarah Mitchell\nHuman Review Coord\nConsensus Building: 10/10\nDecision Confidence: 9/10\nEvidence Rigor: 8/10"]
+    end
+
+    subgraph METRICS["LLM-as-a-Judge Metrics (per agent)"]
+        F[Faithfulness Score\nClaims grounded in context?]
+        R[Reasoning Score\nCausally sound logic?]
+        A[Agreement Score\nAligns with peer agents?]
+        C[Coverage Score\nAddresses all key signals?]
+        H[Hallucination Rate\nInvented facts?]
+        REL[Reliability Score\nActionable & calibrated?]
+    end
+
+    subgraph VERDICT["Verdict System"]
+        PASS["PASS ✅\nOverall ≥ 0.78"]
+        PARTIAL["PARTIAL ⚠️\nOverall 0.60–0.77"]
+        FAIL["FAIL ❌\nOverall < 0.60"]
+    end
+
+    subgraph PIPELINE_SCORE["Pipeline Score"]
+        P1S[Phase 1 Score\nAvg of 3 agents]
+        P2S[Phase 2 Score\nVerification + bonus]
+        P3S[Phase 3 Score\nAmbiguity + calibration bonus]
+        P4S[Phase 4 Score\nCoord × 0.85 + conf × 0.15]
+        TOTAL[Pipeline Score\nAvg of 4 phases\n≥0.75 PASSED\n≥0.58 PARTIAL\n<0.58 FAILED]
+    end
+
+    DE & PR & AD & VA & AM & HC --> METRICS
+    METRICS --> VERDICT
+    P1S & P2S & P3S & P4S --> TOTAL
+```
+
+---
+
+## 10. Technology Stack Mapping
+
+```mermaid
+mindmap
+  root((Industrial\nDiagnostic AI))
+    Frontend
+      React 18
+        react-router-dom
+        framer-motion animations
+        lucide-react icons
+      Vite 5
+        Hot Module Replacement
+        ESBuild bundler
+      TailwindCSS 3
+        Glassmorphism design
+        Dark theme
+      Axios
+        120s timeout for LLM
+    Backend
+      FastAPI 0.11x
+        CORS Middleware
+        Async lifespan
+        Pydantic v2 schemas
+        BackgroundTasks
+      Uvicorn ASGI
+        Reload mode
+        Port 8000
+      Python 3.10+
+        asyncio.gather
+        httpx async HTTP
+        python-dotenv
+    AI / ML
+      sentence-transformers
+        all-MiniLM-L6-v2
+        384-dim embeddings
+      FAISS CPU
+        IndexFlatL2
+        Disk persistence
+      LLM Providers
+        OpenAI GPT-4o
+        Ollama llama3/mistral
+        Rule-based fallback
+    Storage
+      SQLite
+        WAL journal mode
+        analysis_store.db
+      File System
+        faiss_indexes/
+        uploads/
+        data/
+    Data Sources
+      FailureSensorIQ CSV
+        Q&A benchmark
+        500 rows sampled
+      AFRB CSV
+        User upload
+        Flexible schema
+      Synthetic Supplement
+        50 auto-generated records
+```
+
+---
+
+## 11. Confidence Scoring & Decision Loop
+
+```mermaid
+flowchart TD
+    A[Agent Pipeline Produces\nraw confidence from\nHumanReviewCoordinator] --> B[Clamp to 0.0–1.0]
+    B --> C[SystemAnalysisAgent runs\nInlineEvaluationReport]
+    C --> D{analysis_report has\nconfidence_score?}
+    D -->|Yes| E[Recalibrate:\nfinal_confidence = analysis_report.confidence.confidence_score]
+    D -->|No| F[Keep coordinator confidence]
+    E --> G
+    F --> G
+
+    G{Confidence Threshold\nCheck}
+    G -->|≥ 0.75| H[🟢 High Confidence\nFollow recommendation directly]
+    G -->|0.50–0.74| I[🟡 Moderate Confidence\nVerify with additional inspection]
+    G -->|< 0.50| J[🔴 Low Confidence\nHuman expert review recommended\nambiguity=true flag]
+
+    H --> K[API Response]
+    I --> K
+    J --> L[AmbiguityDetectionAgent\nhuman_review_required=true] --> K
+
+    K --> M[Frontend renders\nConfidenceBar color-coded\nAmbiguity warning banner\nPhase test panel scores]
+
+    M --> N{User satisfied?}
+    N -->|No - new query| O[New question\nrestarted pipeline]
+    N -->|Yes| P[✅ Analysis saved\nto SQLite async]
+    P --> Q[AgentPerformanceReport\nupdated in /analysis dashboard]
+    Q --> R{Feedback loop:\nBaseline vs Actual scores}
+    R --> S[Trait-weighted expected scores\ncompared to real pipeline scores]
+    S --> T[Best/Worst agent identified\nper metric dimension]
+```
+
+---
+
+## 12. Module-wise Input/Output Summary
+
+| Module | Input | Output | Technology |
+|---|---|---|---|
+| `FailureIQLoader` | CSV path / synthetic | `List[{content, metadata}]` | Python csv, random |
+| `AFRBLoader` | CSV file path | `List[{content, metadata}]` | pandas, pathlib |
+| `Embedder` | `List[str]` texts | `np.ndarray (N×384)` | sentence-transformers |
+| `FAISSStore.build_index` | name + doc list | Saved `.faiss` + `.pkl` | FAISS IndexFlatL2 |
+| `FAISSStore.search` | query str + top_k | `List[{content, score, metadata}]` | FAISS + numpy |
+| `BaseAgent.run` | question + context | `Dict[str, Any]` structured result | LLMClient + httpx |
+| `AgentOrchestrator.run` | question + dataset + docs | `QueryResponse` dict | asyncio + 7 agents |
+| `evaluate_phase1/2/3/4` | agent results + context | Phase eval with score + verdict | LLM-as-a-Judge |
+| `SystemAnalysisAgent` | all results + latency | `AnalysisReport` (7 sub-sections) | LLMClient |
+| `save_analysis` | analysis_report + metadata | SQLite row id | sqlite3 |
+| `get_agent_aggregates` | limit + filter | 6-agent trait + metric report | sqlite3 + math |
+| `api.js sendQuery` | question + datasetType | `QueryResponse` JSON | axios POST |
+| `ChatPage handleSubmit` | user input string | UI state update + message render | React useState |
+| `AnalysisDashboard` | — | Charts + history + performance | GET /analyses + /agent-report |
+
+---
+
+## 13. Execution Pipeline — Step-by-Step Annotated
+
+```mermaid
+flowchart LR
+    S1["① Startup\nlifespan():\n• init_db SQLite\n• Embedder load model\n• FAISSStore init\n• Load/build indexes"] --> S2
+
+    S2["② User Visits\n/ Landing Page\nDataset selection\nHealth check"] --> S3
+
+    S3["③ Dataset Load\nPOST /load-data\nCache check → FAISS\nbuild if needed"] --> S4
+
+    S4["④ User Query\nPOST /query\n{question, dataset_type, top_k}"] --> S5
+
+    S5["⑤ RAG Retrieval\nembed query\nFAISS.search top-5\nformat_context"] --> S6
+
+    S6["⑥ Phase 1 Parallel\nasyncio.gather:\nDiagnosticExpert\nAggressiveDecision\nPatternRecognition"] --> S7
+
+    S7["⑦ Phase 1 Eval\nLLM Judge ×3\nfaithfulness\nreasoning\ncoverage\nhallucination\nagreement\nreliability"] --> S8
+
+    S8["⑧ Phase 2\nVerificationAnalyst\nreceives phase1_test\nresolves contradictions"] --> S9
+
+    S9["⑨ Phase 3\nAmbiguityDetection\nconfidence calibration\nhuman_review flag"] --> S10
+
+    S10["⑩ Phase 4\nHumanReviewCoord\nfinal synthesis JSON\nall prior context"] --> S11
+
+    S11["⑪ Phase 5\nSystemAnalysis\nInlineEvaluationReport\nrecalibrate confidence"] --> S12
+
+    S12["⑫ Background\nsave_analysis()\nSQLite persist\nanalysis_report JSON"] --> S13
+
+    S13["⑬ HTTP Response\nQueryResponse\nfinal_diagnosis\nconfidence\nreasoning[]\nagent_outputs[6]\nphase_test_results"] --> S14
+
+    S14["⑭ Frontend Render\nDiagnosisCard\nConfidenceBar\nReasoningAccordion\nAgentContributions\nPersonaOutputs\nPhaseTestPanel"]
+```

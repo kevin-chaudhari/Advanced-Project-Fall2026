@@ -1,0 +1,21 @@
+asset_id,asset_name,failure_mode,fault_type,severity,component,system,temperature_c,vibration_mms,pressure_bar,flow_rate_lpm,operating_hours,last_maintenance_days,description
+A001,Pump-Alpha,Bearing Wear,Mechanical,High,Bearing,Cooling System,92.4,11.2,4.5,120.3,8450,45,Elevated vibration and temperature suggest bearing degradation in pump shaft
+A002,Motor-Beta,Overheating,Thermal,Critical,Winding,Drive System,118.7,3.1,N/A,N/A,12300,90,Winding temperature exceeded safe limit; possible insulation breakdown
+A003,Compressor-Gamma,Cavitation,Fluid Dynamic,Medium,Impeller,Hydraulic Circuit,65.2,7.8,1.2,85.6,5200,30,Low suction pressure causing vapour bubble formation in impeller
+A004,Gearbox-Delta,Lubrication Failure,Mechanical,High,Gear Train,Transmission,88.1,9.4,N/A,N/A,9800,60,Oil viscosity degraded; metal-on-metal contact detected via debris analysis
+A005,Valve-Epsilon,Seal Failure,Leakage,Medium,Valve Seat,Process Line,55.0,1.5,8.9,42.1,3100,15,Internal bypass leakage reducing flow efficiency by 18%
+A006,Turbine-Zeta,Blade Erosion,Wear,High,Rotor Blade,Steam System,210.5,12.7,22.1,N/A,18700,120,Surface erosion on rotor blades from particulate contamination in steam
+A007,Conveyor-Eta,Belt Misalignment,Mechanical,Low,Drive Belt,Material Handling,45.3,4.2,N/A,N/A,2200,7,Belt tracking deviation causing uneven wear on pulleys
+A008,HeatExchanger-Theta,Fouling,Thermal,Medium,Tube Bundle,Heat Transfer,95.6,2.0,6.3,180.2,6700,55,Scaling on tube surfaces reducing heat transfer coefficient by 25%
+A009,Pump-Iota,Impeller Damage,Mechanical,High,Impeller,Cooling System,78.3,8.9,2.8,95.4,7100,40,Chipped impeller vane causing flow imbalance and vibration
+A010,Motor-Kappa,Electrical Fault,Electrical,Critical,Stator,Drive System,105.2,2.8,N/A,N/A,15600,100,Phase imbalance detected; stator resistance asymmetry confirmed
+A011,Compressor-Lambda,Piston Ring Wear,Mechanical,Medium,Piston,Compression Stage,72.1,5.6,14.2,N/A,11200,75,Blow-by gas detected; compression ratio dropping below operational threshold
+A012,Gearbox-Mu,Gear Tooth Fatigue,Fatigue Crack,High,Pinion Gear,Transmission,83.7,10.1,N/A,N/A,13400,85,Crack propagation on pinion gear tooth root; spalling evident in oil sample
+A013,Valve-Nu,Actuator Failure,Electrical,Low,Solenoid,Control System,38.5,0.5,5.1,28.9,1800,5,Solenoid coil impedance out of specification; intermittent operation
+A014,Turbine-Xi,Shaft Misalignment,Mechanical,High,Coupling,Power Train,188.3,13.5,18.7,N/A,22100,150,Angular misalignment at flexible coupling; high axial vibration
+A015,Pump-Omicron,Suction Cavitation,Fluid Dynamic,Medium,Impeller,Water Circuit,61.8,6.3,0.9,67.2,4500,25,Net positive suction head insufficient; noise and erosion pitting observed
+A016,Motor-Pi,Rotor Imbalance,Mechanical,Medium,Rotor,Drive System,71.4,9.7,N/A,N/A,8900,50,Mass distribution asymmetry causing 1x RPM vibration signature
+A017,HeatExchanger-Rho,Tube Leak,Leakage,Critical,Tube,Heat Transfer,88.9,1.8,4.4,145.7,9200,65,Cross-contamination detected between shell and tube sides
+A018,Conveyor-Sigma,Roller Bearing Failure,Mechanical,High,Idler Roller,Material Handling,58.2,8.4,N/A,N/A,6300,35,Flat spot on roller bearing causing periodic impact vibration
+A019,Compressor-Tau,Valve Leakage,Leakage,Medium,Suction Valve,Compression Stage,69.5,4.1,11.8,N/A,8100,45,Suction valve not seating properly; volumetric efficiency reduced
+A020,Pump-Upsilon,Shaft Seal Leak,Leakage,Low,Mechanical Seal,Cooling System,52.6,2.3,3.7,88.1,2800,10,Minor leakage at mechanical seal face; acceptable threshold not yet exceeded
