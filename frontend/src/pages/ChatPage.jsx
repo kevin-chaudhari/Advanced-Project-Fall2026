@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import { Send, Loader2, AlertTriangle, Upload, RefreshCw } from 'lucide-react'
 import AppShell from '../components/AppShell'
 import DiagnosisReport from '../components/DiagnosisReport'
+import DecisionExplorer from '../components/DecisionExplorer'
 import { cx, SourceBadge } from '../components/ui'
 import { checkHealth, loadDataset, sendQuery } from '../services/api'
 
@@ -126,7 +127,7 @@ export default function ChatPage() {
         </header>
 
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-6xl mx-auto px-6 py-6 space-y-8">
+          <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-6 space-y-8">
             {runs.length === 0 && (
               <div className="card p-8 text-center">
                 <h2 className="text-lg font-semibold">Ask a diagnostic question</h2>
@@ -142,7 +143,23 @@ export default function ChatPage() {
                 <div className="flex justify-end">
                   <div className="max-w-3xl rounded-xl bg-primary-600 text-white px-4 py-2.5 text-sm">{r.question}</div>
                 </div>
-                {r.result && <DiagnosisReport result={r.result} />}
+                {r.result && (
+                  <div className="space-y-3">
+                    <div role="tablist" aria-label="Result view" className="inline-flex rounded-lg bg-slate-100 p-1">
+                      {[['explorer', 'Decision Explorer'], ['report', 'Detailed report']].map(([v, label]) => (
+                        <button key={v} role="tab" aria-selected={(r.view || 'explorer') === v}
+                          onClick={() => setRuns((all) => all.map((x, j) => (j === i ? { ...x, view: v } : x)))}
+                          className={cx('rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors',
+                            (r.view || 'explorer') === v ? 'bg-white shadow-card text-ink' : 'text-muted hover:text-ink')}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {(r.view || 'explorer') === 'explorer'
+                      ? <DecisionExplorer result={r.result} question={r.question} />
+                      : <DiagnosisReport result={r.result} />}
+                  </div>
+                )}
                 {r.error && <div className="card p-4 text-sm text-danger-700 flex gap-2"><AlertTriangle size={16} />{r.error}</div>}
                 {!r.result && !r.error && (
                   <div className="card p-4 text-sm text-muted flex items-center gap-2">
@@ -156,7 +173,7 @@ export default function ChatPage() {
         </div>
 
         <footer className="shrink-0 border-t border-line bg-white px-6 py-3">
-          <div className="max-w-6xl mx-auto flex items-end gap-2">
+          <div className="max-w-[1440px] mx-auto flex items-end gap-2">
             <textarea value={input} onChange={(e) => setInput(e.target.value)} rows={2} className="input resize-none"
               placeholder="e.g. Slurry pump: temperature 93 °C, vibration 0.79, current 55 A … what is the most likely fault?"
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() } }} />
@@ -164,7 +181,7 @@ export default function ChatPage() {
               {loading ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
             </button>
           </div>
-          {error && <p className="max-w-6xl mx-auto text-[12px] text-danger-600 mt-1">{error}</p>}
+          {error && <p className="max-w-[1440px] mx-auto text-[12px] text-danger-600 mt-1">{error}</p>}
         </footer>
       </div>
     </AppShell>
