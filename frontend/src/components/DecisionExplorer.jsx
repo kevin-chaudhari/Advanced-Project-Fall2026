@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Maximize2, Minimize2, MessageSquareText, CheckCircle2, ShieldAlert, AlertTriangle, GitMerge,
-  Database, ChevronRight, Clock, Layers, FileCheck2, RotateCcw, Wrench, HelpCircle,
+  Database, Clock, FileCheck2, RotateCcw, Wrench, HelpCircle, ChevronDown, ArrowDown,
+  PanelLeftClose, PanelLeftOpen, ListChecks, Gauge, BarChart3,
 } from 'lucide-react'
-import useFlip from '../hooks/useFlip'
 import { cx, pct, fmtNum, SourceBadge, DecisionBadge, StatusIcon, Cited, IdChip, Empty } from './ui'
 import EvidenceExplorer from './EvidenceExplorer'
 import OrchestrationFlow from './OrchestrationFlow'
 import { HypothesisPanel, ConfidencePanel, SensorPanel, AuditPanel } from './ReportPanels'
+import { SensorHealthChart, HypothesisComparisonChart } from './DiagnosticCharts'
 
 /* Categorical palette in fixed order (validated data-viz palette); assigned to
    agents in the order the backend returns them — never by name. */
@@ -114,52 +116,95 @@ function ConfBar({ value, label = 'Confidence' }) {
   )
 }
 
-function Metric({ icon: Icon, label, value, hint, tone }) {
+/* ── controls ────────────────────────────────────────────────────────────── */
+function IconBtn({ label, onClick, children, className, ...rest }) {
   return (
-    <div className="rounded-lg border border-line bg-white px-3 py-2 min-w-0">
-      <div className="flex items-center gap-1.5 text-[11px] text-muted"><Icon size={12} />{label}</div>
-      <div className={cx('text-[14px] font-semibold truncate mt-0.5', tone || 'text-ink')} title={typeof value === 'string' ? value : undefined}>{value}</div>
-      {hint && <div className="text-[10.5px] text-muted truncate" title={hint}>{hint}</div>}
+    <button type="button" onClick={onClick} aria-label={label} title={label}
+      className={cx('inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted transition-colors',
+        'hover:bg-slate-100 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500', className)}
+      {...rest}>
+      {children}
+    </button>
+  )
+}
+
+function CollapseBtn({ collapsed, onToggle, label, controls }) {
+  return (
+    <IconBtn label={`${collapsed ? 'Expand' : 'Collapse'} ${label}`} onClick={onToggle} aria-expanded={!collapsed} aria-controls={controls}>
+      <ChevronDown size={14} className={cx('transition-transform duration-200', collapsed && '-rotate-90')} />
+    </IconBtn>
+  )
+}
+
+function MaximizeBtn({ label, onClick }) {
+  return <IconBtn label={`Maximize ${label}`} onClick={onClick} aria-haspopup="dialog"><Maximize2 size={13} /></IconBtn>
+}
+
+function StageNum({ n }) {
+  return <span className="w-5 h-5 shrink-0 rounded-full bg-slate-100 text-slate-700 text-[11px] font-semibold flex items-center justify-center tabular-nums" aria-hidden>{n}</span>
+}
+
+/** Visual connector between workflow stages (presentation only). */
+function Connector() {
+  return (
+    <div className="flex justify-center py-1" aria-hidden>
+      <div className="flex flex-col items-center text-slate-300"><span className="w-px h-2 bg-slate-300" /><ArrowDown size={12} className="-mt-0.5" /></div>
     </div>
   )
 }
 
-/** A clickable dashboard panel that can maximise into the focus area. */
-function Panel({ id, flip, expanded, onToggle, title, subtitle, accent, children, className, highlighted, onHover }) {
-  const isOpen = expanded === id
-  return (
-    <section
-      ref={isOpen ? undefined : flip.register(id)}
-      onMouseEnter={onHover ? () => onHover(true) : undefined}
-      onMouseLeave={onHover ? () => onHover(false) : undefined}
-      onClick={() => onToggle(id)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(id) } }}
-      role="button" tabIndex={0} aria-expanded={isOpen}
-      className={cx('group relative rounded-xl border bg-white text-left cursor-pointer transition-[box-shadow,border-color,opacity] duration-200',
-        'hover:shadow-lift focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500',
-        isOpen ? 'border-primary-500 ring-2 ring-primary-100 opacity-60' : highlighted ? 'border-primary-500 ring-2 ring-primary-100' : 'border-line shadow-card',
-        className)}
-    >
-      {accent && <span aria-hidden className="absolute left-0 top-3 bottom-3 w-1 rounded-r" style={{ background: accent }} />}
-      <header className="flex items-start justify-between gap-2 px-4 pt-3">
-        <div className="min-w-0">{title}{subtitle && <div className="text-[11px] text-muted mt-0.5">{subtitle}</div>}</div>
-        <span className="shrink-0 text-muted opacity-60 group-hover:opacity-100 transition-opacity" title={isOpen ? 'Shown above' : 'Expand'}>
-          {isOpen ? <Layers size={14} /> : <Maximize2 size={14} />}
-        </span>
-      </header>
-      <div className="px-4 pb-3 pt-2">{children}</div>
-      {isOpen && <div className="absolute inset-0 rounded-xl flex items-center justify-center text-[12px] font-medium text-primary-700 bg-white/40">Expanded above</div>}
-    </section>
+/** Modal used for the maximised view of a panel. Esc / backdrop / Minimize close it; focus is trapped and restored. */
+function Dialog({ title, contentKey, onClose, children }) {
+  const titleId = useId()
+  const panelRef = useRef(null)
+  const closeRef = useRef(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement
+    closeRef.current?.focus()
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); onCloseRef.current() }
+      if (e.key !== 'Tab' || !panelRef.current) return
+      const f = panelRef.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+      if (!f.length) return
+      const first = f[0], last = f[f.length - 1]
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('keydown', onKey); previouslyFocused?.focus?.({ preventScroll: true }) }
+  }, [])
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/40 p-2 sm:p-6 de-fade"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={titleId}
+        className="flex w-full max-w-6xl max-h-full flex-col rounded-xl border border-line bg-white shadow-lift">
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-5">
+          <div id={titleId} className="min-w-0">{title}</div>
+          <button ref={closeRef} type="button" onClick={onClose} className="btn-ghost border border-line px-2.5 py-1.5" aria-label="Minimize panel" title="Minimize (Esc)">
+            <Minimize2 size={14} /> <span className="hidden sm:inline">Minimize</span>
+          </button>
+        </header>
+        {/* keyed so switching content (e.g. agent → evidence) starts at the top */}
+        <div key={contentKey} className="overflow-y-auto p-4 sm:p-5 de-fade-up">{children}</div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 
+/* ── agent cards ─────────────────────────────────────────────────────────── */
 function AgentTitle({ agent }) {
+  const sub = [agent.title, agent.persona].filter(Boolean).join(' · ')
   return (
     <div className="flex items-center gap-2 min-w-0">
       <span className="w-7 h-7 shrink-0 rounded-full flex items-center justify-center text-[14px]" style={{ background: `${agent.color}1f`, boxShadow: `inset 0 0 0 1.5px ${agent.color}` }} aria-hidden>{agent.emoji || '•'}</span>
       <div className="min-w-0">
-        <div className="text-[13px] font-semibold text-ink truncate">{agent.name}</div>
-        <div className="text-[11px] text-muted truncate">{[agent.title, agent.persona].filter(Boolean).join(' · ')}</div>
+        <div className="text-[13px] font-semibold text-ink leading-tight break-words">{agent.name}</div>
+        {sub && <div className="text-[11px] text-muted truncate" title={sub}>{sub}</div>}
       </div>
     </div>
   )
@@ -177,36 +222,39 @@ function AgentStatusLine({ agent }) {
 }
 
 /* ── compact bodies ──────────────────────────────────────────────────────── */
-function AgentCompact({ agent, result, model, dense }) {
+function AgentCompact({ agent, result, model, dense, wide, onEvidence }) {
   const rep = agent.report
   const adv = rep?.extras?.adversarial_review
   const flags = rep?.extras?.flags
+  const isFinal = agent.column === 'final'
+  const decision = result.review_decision || model.h.review_decision
+  const headline = agent.findingLabel || agent.finding
+
   if (dense) {
     return (
       <div className="space-y-1.5">
         <AgentStatusLine agent={agent} />
-        <div className="text-[12px] font-semibold text-ink truncate" title={agent.findingLabel || agent.finding}>{agent.findingLabel || agent.finding}</div>
+        {headline && <div className="text-[12px] font-semibold text-ink truncate" title={headline}>{headline}</div>}
         <ConfBar value={agent.confidence} />
       </div>
     )
   }
-  return (
-    <div className="space-y-2">
-      <AgentStatusLine agent={agent} />
-      {agent.column !== 'final' && agent.finding && <div className="text-[13px] font-semibold text-ink leading-snug line-clamp-2">{agent.finding}</div>}
 
-      {agent.column === 'final' ? (
+  const main = (
+    <>
+      {!isFinal && agent.finding && <div className={cx('text-[13px] font-semibold text-ink leading-snug', !wide && 'line-clamp-2')}>{agent.finding}</div>}
+      {isFinal ? (
         <>
-          <p className="text-[12.5px] text-ink leading-snug line-clamp-5"><Cited text={result.final_diagnosis} /></p>
-          {result.recommendation && <p className="text-[12px] text-muted leading-snug line-clamp-3 flex gap-1.5"><Wrench size={12} className="mt-0.5 shrink-0 text-primary-600" />{result.recommendation}</p>}
-          {(result.review_decision || model.h.review_decision) && <DecisionBadge decision={result.review_decision || model.h.review_decision} />}
+          <p className={cx('text-[12.5px] text-ink leading-relaxed', wide ? 'line-clamp-4' : 'line-clamp-5')}><Cited text={result.final_diagnosis} onEvidence={onEvidence} /></p>
+          {result.recommendation && <p className="text-[12px] text-muted leading-snug line-clamp-3 flex gap-1.5"><Wrench size={12} className="mt-0.5 shrink-0 text-primary-600" /><span>{result.recommendation}</span></p>}
+          {!wide && decision && <DecisionBadge decision={decision} />}
         </>
       ) : adv ? (
-        <ul className="space-y-1 text-[11.5px]">
+        <ul className={cx('text-[11.5px]', wide ? 'flex flex-wrap gap-x-5 gap-y-1' : 'space-y-1')}>
           <li className="flex gap-1.5 text-ink"><CheckCircle2 size={12} className="text-success-600 mt-0.5 shrink-0" />{adv.what_supports_it?.length ?? 0} supporting item(s)</li>
           <li className="flex gap-1.5 text-ink"><AlertTriangle size={12} className={cx('mt-0.5 shrink-0', adv.what_contradicts_it?.length ? 'text-danger-600' : 'text-slate-300')} />{adv.what_contradicts_it?.length ?? 0} contradicting item(s)</li>
           <li className="flex gap-1.5 text-ink"><HelpCircle size={12} className={cx('mt-0.5 shrink-0', adv.what_is_missing?.length ? 'text-warning-500' : 'text-slate-300')} />{adv.what_is_missing?.length ?? 0} missing-evidence item(s)</li>
-          {adv.alternative_explanation && <li className="text-muted line-clamp-2">Alternative: {adv.alternative_explanation}</li>}
+          {adv.alternative_explanation && <li className={cx('text-muted line-clamp-2', wide && 'basis-full')}>Alternative: {adv.alternative_explanation}</li>}
         </ul>
       ) : flags ? (
         flags.length ? (
@@ -222,66 +270,170 @@ function AgentCompact({ agent, result, model, dense }) {
         <>
           {rep?.narrative && <p className="text-[12px] text-muted leading-snug line-clamp-3">{rep.narrative}</p>}
           {rep?.supporting_evidence?.length > 0 && (
-            <div className="rounded-md bg-slate-50 px-2 py-1.5 text-[11px] text-muted line-clamp-2"><span className="font-medium text-ink">Key factor: </span><Cited text={rep.supporting_evidence[0].statement} /></div>
+            /* clamp the inner paragraph, not the padded box, so clipped lines/chips never peek out */
+            <div className="rounded-md bg-slate-50 px-2 py-1.5 text-[11px] text-muted">
+              <p className="line-clamp-2 leading-[18px]"><span className="font-medium text-ink">Key factor: </span><Cited text={rep.supporting_evidence[0].statement} onEvidence={onEvidence} /></p>
+            </div>
           )}
         </>
       )}
+    </>
+  )
 
+  const meta = (
+    <div className="space-y-1.5">
+      {wide && isFinal && decision && <DecisionBadge decision={decision} />}
       <ConfBar value={agent.confidence} />
       {agent.evidenceUsed.length > 0 && <div className="text-[10.5px] text-muted">cites {agent.evidenceUsed.length} evidence record(s)</div>}
     </div>
   )
+
+  if (wide) {
+    return (
+      <div className="grid gap-x-5 gap-y-2.5 sm:grid-cols-[minmax(0,1fr)_200px]">
+        <div className="min-w-0 space-y-2"><AgentStatusLine agent={agent} />{main}</div>
+        <div className="sm:border-l sm:border-line sm:pl-4">{meta}</div>
+      </div>
+    )
+  }
+  return (
+    <div className="flex flex-1 flex-col gap-2">
+      <AgentStatusLine agent={agent} />
+      {main}
+      <div className="mt-auto pt-1">{meta}</div>
+    </div>
+  )
 }
 
-function EvidenceCompact({ model, hoverAgent, setHoverEv, dense }) {
-  if (dense) {
-    const c = model.h.evidence_composition || {}
-    return <div className="text-[12px] text-muted">{model.evidence.length} record(s) · REAL {c.real ?? 0} · SYNTHETIC {c.synthetic ?? 0}</div>
-  }
-  const sensors = (model.h.sensor_view || []).filter((s) => s.value != null || s.status === 'missing')
+function AgentCard({ agent, result, model, collapsed, onToggleCollapse, onMaximize, onEvidence, highlighted, onHover, stage, wide, uid }) {
+  const bodyId = `${uid}-agent-${agent.key}`
+  const isFinal = agent.column === 'final'
+  const auto = (result.review_decision || model.h.review_decision) === 'AUTO_RESOLVE'
+  return (
+    <article
+      onMouseEnter={() => onHover(true)} onMouseLeave={() => onHover(false)}
+      aria-label={stage ? `${stage.n}. ${stage.label}: ${agent.name}` : agent.name}
+      className={cx('relative flex min-w-0 flex-col rounded-xl border bg-white transition-[box-shadow,border-color] duration-200',
+        highlighted ? 'border-primary-500 ring-2 ring-primary-100' : isFinal ? (auto ? 'border-success-100 shadow-card' : 'border-warning-100 shadow-card') : 'border-line shadow-card',
+        isFinal && !highlighted && (auto ? 'bg-gradient-to-r from-success-50/60 to-white' : 'bg-gradient-to-r from-warning-50/60 to-white'))}>
+      <span aria-hidden className="absolute left-0 top-3 bottom-3 w-1 rounded-r" style={{ background: agent.color }} />
+      <header className="flex items-start gap-2 pl-4 pr-2 pt-2.5">
+        {stage && <span className="pt-1"><StageNum n={stage.n} /></span>}
+        <div className="min-w-0 flex-1"><AgentTitle agent={agent} /></div>
+        {stage && <span className="hidden md:block self-center whitespace-nowrap text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted">{stage.label}</span>}
+        <div className="flex items-center gap-0.5">
+          <CollapseBtn collapsed={collapsed} onToggle={onToggleCollapse} label={agent.name} controls={bodyId} />
+          <MaximizeBtn label={`${agent.name} details`} onClick={onMaximize} />
+        </div>
+      </header>
+      <div id={bodyId} className="flex flex-1 flex-col pl-4 pr-3 pb-3 pt-2">
+        <AgentCompact agent={agent} result={result} model={model} dense={collapsed} wide={wide} onEvidence={onEvidence} />
+      </div>
+    </article>
+  )
+}
+
+function InitialGroup({ n, title, subtitle, agents, model, collapsed, onToggle, renderCard, uid }) {
+  const bodyId = `${uid}-initial`
+  const agreeText = model.verified && model.initial.length
+    ? `${model.agreeing.length}/${model.initial.length} agree on ${model.verified}` : null
+  return (
+    <section className="rounded-xl border border-line bg-slate-50/70 shadow-card" aria-labelledby={`${bodyId}-title`}>
+      <header className={cx('flex items-center gap-2 px-3 py-2', !collapsed && 'border-b border-line')}>
+        <StageNum n={n} />
+        <div className="min-w-0 flex-1">
+          <h3 id={`${bodyId}-title`} className="text-[13px] font-semibold text-ink">{title}</h3>
+          <p className="text-[11px] text-muted truncate">{subtitle} · {agents.length} agent{agents.length === 1 ? '' : 's'}{agreeText ? ` · ${agreeText}` : ''}</p>
+        </div>
+        <CollapseBtn collapsed={collapsed} onToggle={onToggle} label={title.toLowerCase()} controls={bodyId} />
+      </header>
+      <div id={bodyId}>
+        {collapsed ? (
+          <ul className="divide-y divide-line px-3 py-1">
+            {agents.map((a) => (
+              <li key={a.key} className="flex items-center gap-2 py-1.5 text-[12px] min-w-0">
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: a.color }} aria-hidden />
+                <span className="font-medium text-ink truncate min-w-0 flex-1" title={a.name}>{a.name}</span>
+                {a.status && <StatusIcon status={a.status} size={12} />}
+                <span className="truncate max-w-[40%] text-muted" title={a.findingLabel || a.finding}>{a.findingLabel || a.finding}</span>
+                <span className="w-9 text-right tabular-nums text-ink font-medium">{a.confidence == null ? '—' : a.confidence.toFixed(2)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="grid gap-3 p-3 grid-cols-[repeat(auto-fit,minmax(196px,1fr))]">
+            {agents.map(renderCard)}
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+/* ── sidebar ─────────────────────────────────────────────────────────────── */
+function SidebarSection({ id, title, icon: Icon, collapsed, onToggle, actions, highlighted, children }) {
+  return (
+    <section className={cx('rounded-xl border bg-white transition-[box-shadow,border-color] duration-200',
+      highlighted ? 'border-primary-500 ring-2 ring-primary-100' : 'border-line shadow-card')} aria-labelledby={`${id}-title`}>
+      <header className="flex items-center gap-1.5 pl-3 pr-2 py-2">
+        <Icon size={13} className="text-primary-600 shrink-0" aria-hidden />
+        <h3 id={`${id}-title`} className="flex-1 min-w-0 truncate text-[12.5px] font-semibold text-ink">{title}</h3>
+        {actions}
+        <CollapseBtn collapsed={collapsed} onToggle={onToggle} label={title.toLowerCase()} controls={id} />
+      </header>
+      <div id={id} hidden={collapsed} className="px-3 pb-3">{children}</div>
+    </section>
+  )
+}
+
+function SummaryRow({ icon: Icon, label, value, hint, tone }) {
+  return (
+    <div className="flex items-start gap-2 py-1.5">
+      <Icon size={13} className="mt-0.5 shrink-0 text-muted" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <div className="text-[11.5px] text-muted leading-tight">{label}</div>
+        {hint && <div className="text-[10.5px] text-muted leading-tight truncate mt-0.5" title={hint}>{hint}</div>}
+      </div>
+      <div className={cx('max-w-[55%] text-right text-[12.5px] font-semibold leading-tight break-words', tone || 'text-ink')}>{value}</div>
+    </div>
+  )
+}
+
+const TOP_EVIDENCE = 6
+
+function EvidenceCompact({ model, hoverAgent, setHoverEv, showAll, setShowAll, onEvidence, listId }) {
   const used = hoverAgent ? new Set(model.agents.find((a) => a.key === hoverAgent)?.evidenceUsed || []) : null
   const comp = model.h.evidence_composition || {}
   const targeted = model.evidence.filter((e) => e.retrieval_round > 0).length
+  const list = showAll ? model.evidence : model.evidence.slice(0, TOP_EVIDENCE)
   return (
     <div className="space-y-3">
-      {sensors.length > 0 && (
-        <div>
-          <div className="eyebrow mb-1">Reported readings vs reference band</div>
-          <div className="space-y-1.5">
-            {sensors.map((s) => {
-              const lo = s.band_low, hi = s.band_high
-              const span = (hi - lo) || 1
-              const pos = s.value == null ? null : Math.max(0, Math.min(1, (s.value - (lo - span)) / (3 * span)))
-              const off = s.status === 'high' || s.status === 'low'
-              return (
-                <div key={s.sensor} className="text-[11px]">
-                  <div className="flex justify-between"><span className="text-ink">{s.label}</span>
-                    <span className={cx('tabular-nums', s.value == null ? 'italic text-warning-700' : off ? 'text-warning-700 font-semibold' : 'text-muted')}>
-                      {s.value == null ? 'unavailable' : `${fmtNum(s.value, 3)} ${s.unit === '(norm. index)' ? '' : s.unit}`}{off ? ` · ${s.status}` : ''}
-                    </span>
-                  </div>
-                  <div className="relative h-1.5 rounded bg-slate-100 mt-0.5" title={`reference band ${fmtNum(lo, 2)} – ${fmtNum(hi, 2)}`}>
-                    <div className="absolute h-full bg-success-100 rounded" style={{ left: '33.3%', width: '33.3%' }} />
-                    {pos != null && <div className="absolute -top-0.5 w-1 h-2.5 rounded-sm" style={{ left: `calc(${pos * 100}% - 2px)`, background: off ? '#B45309' : '#0F172A' }} />}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
+      {/* reported readings now live in the Sensor health overview chart (DiagnosticCharts) */}
       <div>
-        <div className="eyebrow mb-1">Top evidence</div>
+        <div className="flex items-center justify-between mb-1">
+          <span className="eyebrow text-[10px]">{showAll ? 'All evidence' : 'Top evidence'}</span>
+          {model.evidence.length > TOP_EVIDENCE && (
+            <button type="button" onClick={() => setShowAll(!showAll)} aria-expanded={showAll} aria-controls={listId}
+              className="rounded text-[11px] font-medium text-primary-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500">
+              {showAll ? 'Show less' : `Show all ${model.evidence.length}`}
+            </button>
+          )}
+        </div>
         {!model.evidence.length ? <Empty>No evidence retrieved.</Empty> : (
-          <ul className="space-y-1">
-            {model.evidence.slice(0, 6).map((e) => (
-              <li key={e.evidence_id}
-                onMouseEnter={() => setHoverEv(e.evidence_id)} onMouseLeave={() => setHoverEv(null)}
-                className={cx('flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px] transition-colors', used?.has(e.evidence_id) ? 'bg-primary-50 ring-1 ring-primary-200' : used ? 'opacity-50' : 'hover:bg-slate-50')}>
-                <span className="mono text-primary-700 shrink-0">{e.evidence_id}</span>
-                <SourceBadge source={e.source_type} size="xs" />
-                <span className="truncate text-ink flex-1" title={e.label}>{e.label || 'unlabelled'}</span>
-                <span className="tabular-nums text-muted">{fmtNum(e.retrieval_score, 2)}</span>
+          <ul id={listId} className={cx('space-y-0.5', showAll && 'max-h-64 overflow-y-auto pr-1')}>
+            {list.map((e) => (
+              <li key={e.evidence_id}>
+                <button type="button" onClick={() => onEvidence(e.evidence_id)}
+                  onMouseEnter={() => setHoverEv(e.evidence_id)} onMouseLeave={() => setHoverEv(null)}
+                  onFocus={() => setHoverEv(e.evidence_id)} onBlur={() => setHoverEv(null)}
+                  title={`Inspect ${e.evidence_id}`}
+                  className={cx('flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500',
+                    used?.has(e.evidence_id) ? 'bg-primary-50 ring-1 ring-primary-200' : used ? 'opacity-50' : 'hover:bg-slate-50')}>
+                  <span className="mono shrink-0 text-primary-700">{e.evidence_id}</span>
+                  <span className="shrink-0"><SourceBadge source={e.source_type} size="xs" /></span>
+                  <span className="min-w-0 flex-1 truncate text-ink" title={e.label}>{e.label || 'unlabelled'}</span>
+                  <span className="shrink-0 tabular-nums text-muted">{fmtNum(e.retrieval_score, 2)}</span>
+                </button>
               </li>
             ))}
           </ul>
@@ -301,39 +453,43 @@ function Timeline({ model, compact, selected, onSelect }) {
   if (!model.spans.length) return <Empty>No execution events recorded.</Empty>
   const ticks = [0, 0.25, 0.5, 0.75, 1]
   return (
-    <div className="space-y-2" onClick={(e) => e.stopPropagation()}>
-      <div className="grid grid-cols-[minmax(96px,180px)_1fr] gap-x-3 gap-y-1.5 items-center">
-        {lanes.map((lane) => (
-          <Lane key={lane.id ?? 'harness'} lane={lane} spans={model.spans.filter((s) => (s.agent ?? null) === lane.id)}
-            total={model.totalMs} selected={selected} onSelect={onSelect} compact={compact} />
+    <div className={cx('grid items-center', compact ? 'grid-cols-[minmax(72px,128px)_1fr] gap-x-2 gap-y-[3px]' : 'grid-cols-[minmax(96px,180px)_1fr] gap-x-3 gap-y-1.5')}>
+      {lanes.map((lane) => (
+        <Lane key={lane.id ?? 'harness'} lane={lane} spans={model.spans.filter((s) => (s.agent ?? null) === lane.id)}
+          total={model.totalMs} selected={selected} onSelect={onSelect} compact={compact} />
+      ))}
+      <div />
+      <div className={cx('relative text-muted', compact ? 'h-3 text-[9.5px] leading-3' : 'h-4 text-[10px]')}>
+        {/* first/last labels are anchored inside the track so they never overflow or wrap */}
+        {ticks.map((t) => (
+          <span key={t} className={cx('absolute whitespace-nowrap tabular-nums', t === 0 ? '' : t === 1 ? '-translate-x-full' : '-translate-x-1/2')} style={{ left: `${t * 100}%` }}>
+            {fmtNum(model.totalMs * t, 0)} ms
+          </span>
         ))}
-        <div />
-        <div className="relative h-4 text-[10px] text-muted">
-          {ticks.map((t) => <span key={t} className="absolute -translate-x-1/2 tabular-nums" style={{ left: `${t * 100}%` }}>{fmtNum(model.totalMs * t, 0)} ms</span>)}
-        </div>
       </div>
     </div>
   )
 }
 
-function Lane({ lane, spans, total, selected, onSelect }) {
+function Lane({ lane, spans, total, selected, onSelect, compact }) {
   return (
     <>
-      <div className="flex items-center gap-1.5 text-[11px] text-ink truncate" title={lane.label}>
-        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: lane.color }} />{lane.label}
+      <div className={cx('flex min-w-0 items-center gap-1.5 text-ink', compact ? 'text-[10px] leading-3' : 'text-[11px]')} title={lane.label}>
+        <span className={cx('rounded-full shrink-0', compact ? 'w-1.5 h-1.5' : 'w-2 h-2')} style={{ background: lane.color }} /><span className="truncate">{lane.label}</span>
       </div>
-      <div className="relative h-5 rounded bg-slate-50 border border-line/70">
+      <div className={cx('relative rounded-sm bg-slate-50 border border-line/70', compact ? 'h-2.5' : 'h-5')}>
         {spans.map((s) => {
           const left = (s.rs / total) * 100
           const width = Math.max(((s.re - s.rs) / total) * 100, 0.8)
           const isSel = selected === s.step
           return (
-            <button key={s.step} type="button" onClick={() => onSelect(isSel ? null : s.step)}
+            <button key={s.step} type="button" onClick={() => onSelect(isSel ? null : s.step)} aria-pressed={isSel}
               title={`#${s.step} ${s.stage} · ${s.action}\n${fmtNum(s.duration_ms, 1)} ms · ${s.status}${s.reason ? `\n${s.reason}` : ''}`}
-              className={cx('absolute top-0.5 bottom-0.5 rounded-sm transition-[box-shadow,transform] hover:scale-y-125', isSel && 'ring-2 ring-offset-1 ring-ink')}
-              style={{ left: `${Math.min(left, 99.2)}%`, width: `${width}%`, minWidth: 6, background: s.status === 'error' ? '#DC2626' : lane.color, opacity: s.status === 'loop' ? 0.75 : 1,
+              className={cx('absolute rounded-sm transition-[box-shadow,transform] hover:scale-y-125 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500',
+                compact ? 'top-0 bottom-0' : 'top-0.5 bottom-0.5', isSel && 'ring-2 ring-offset-1 ring-ink')}
+              style={{ left: `${Math.min(left, 99.2)}%`, width: `${width}%`, minWidth: compact ? 5 : 6, background: s.status === 'error' ? '#DC2626' : lane.color, opacity: s.status === 'loop' ? 0.75 : 1,
                 backgroundImage: s.status === 'loop' ? 'repeating-linear-gradient(135deg, rgba(255,255,255,.55) 0 2px, transparent 2px 5px)' : undefined }}
-              aria-label={`${s.stage} ${s.action}`} />
+              aria-label={`Step ${s.step}: ${s.stage} ${s.action}`} />
           )
         })}
       </div>
@@ -341,6 +497,80 @@ function Lane({ lane, spans, total, selected, onSelect }) {
   )
 }
 
+function SelectedStep({ model, step, onEvidence }) {
+  const s = model.spans.find((x) => x.step === step)
+  if (!s) return null
+  return (
+    <div className="rounded-lg border border-line bg-slate-50 px-2 py-1.5 text-[11.5px]" aria-live="polite">
+      <span className="mono text-muted">#{s.step}</span> <b className="text-ink">{s.stage}</b> · {s.action} · {fmtNum(s.duration_ms, 1)} ms
+      {s.reason && <div className="text-muted mt-0.5">{s.reason}</div>}
+      {s.evidence_used?.length > 0 && <div className="mt-1 flex flex-wrap gap-1">{s.evidence_used.map((id) => <IdChip key={id} id={id} onClick={onEvidence} />)}</div>}
+    </div>
+  )
+}
+
+const RECENT_EVENTS = 2
+
+function TimelinePanel({ model, latency, collapsed, onToggle, onMaximize, selected, onSelect, showAll, setShowAll, onEvidence, uid }) {
+  const bodyId = `${uid}-timeline`
+  const events = model.spans
+  const visible = showAll ? events : events.slice(-RECENT_EVENTS)
+  const nameOf = Object.fromEntries(model.agents.map((a) => [a.key, a]))
+  return (
+    <section className="rounded-xl border border-line bg-white shadow-card" aria-labelledby={`${bodyId}-title`}>
+      <header className="flex items-center gap-2 pl-3 pr-2 py-1">
+        <Clock size={13} className="shrink-0 text-primary-600" aria-hidden />
+        <h3 id={`${bodyId}-title`} className="whitespace-nowrap text-[12.5px] font-semibold text-ink">Agent interaction timeline</h3>
+        <span className="min-w-0 truncate text-[11px] text-muted">{events.length} events · {fmtNum(latency, 0)} ms end-to-end</span>
+        <div className="ml-auto flex items-center gap-0.5">
+          <CollapseBtn collapsed={collapsed} onToggle={onToggle} label="agent interaction timeline" controls={bodyId} />
+          <MaximizeBtn label="agent interaction timeline" onClick={onMaximize} />
+        </div>
+      </header>
+      <div id={bodyId} hidden={collapsed} className="space-y-1.5 px-3 pb-2">
+        <Timeline model={model} compact selected={selected} onSelect={onSelect} />
+        {selected != null && <SelectedStep model={model} step={selected} onEvidence={onEvidence} />}
+        {events.length > 0 && (
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="eyebrow text-[10px]">{showAll ? `All ${events.length} events` : 'Latest events'}</span>
+              {events.length > RECENT_EVENTS && (
+                <button type="button" onClick={() => setShowAll(!showAll)} aria-expanded={showAll} aria-controls={`${bodyId}-events`}
+                  className="rounded text-[11px] font-medium text-primary-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500">
+                  {showAll ? 'Show less' : `Show all ${events.length}`}
+                </button>
+              )}
+            </div>
+            <ol id={`${bodyId}-events`} className={cx('mt-0.5 divide-y divide-line/70', showAll && 'max-h-48 overflow-y-auto pr-1')}>
+              {visible.map((s) => {
+                const a = s.agent ? nameOf[s.agent] : null
+                const isSel = selected === s.step
+                return (
+                  <li key={s.step}>
+                    <button type="button" onClick={() => onSelect(isSel ? null : s.step)} aria-pressed={isSel}
+                      className={cx('grid w-full items-center gap-2 rounded px-1 py-0.5 text-left text-[11px] leading-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500',
+                        'grid-cols-[28px_minmax(0,1fr)_auto] sm:grid-cols-[28px_minmax(0,150px)_minmax(0,1fr)_56px_auto]', isSel ? 'bg-primary-50' : 'hover:bg-slate-50')}>
+                      <span className="mono text-[10.5px] text-muted">#{s.step}</span>
+                      <span className="hidden sm:flex min-w-0 items-center gap-1.5 text-ink">
+                        <span className="w-1.5 h-1.5 shrink-0 rounded-full" style={{ background: a?.color || NEUTRAL }} />
+                        <span className="truncate">{a?.name || 'Harness'}</span>
+                      </span>
+                      <span className="truncate text-muted" title={`${s.stage} · ${s.action}`}><span className="sm:hidden text-ink">{a?.name || 'Harness'} · </span>{s.stage} · {s.action}</span>
+                      <span className="hidden sm:block text-right tabular-nums text-[10.5px] text-muted" title="start offset">+{fmtNum(s.rs, 1)} ms</span>
+                      <span className="flex items-center justify-end gap-1 whitespace-nowrap tabular-nums text-muted"><StatusIcon status={s.status} size={11} />{fmtNum(s.duration_ms, 1)} ms</span>
+                    </button>
+                  </li>
+                )
+              })}
+            </ol>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+/* ── expanded detail views ───────────────────────────────────────────────── */
 /* ── expanded detail views ───────────────────────────────────────────────── */
 function ExtrasView({ extras }) {
   const entries = Object.entries(extras || {}).filter(([k, v]) => !HIDDEN_EXTRAS.has(k) && v != null && !(Array.isArray(v) && !v.length))
@@ -454,33 +684,29 @@ function AgentDetail({ agent, model, result, onEvidence }) {
 }
 
 /* ── main component ──────────────────────────────────────────────────────── */
+const isDesktop = () => typeof window === 'undefined' || !window.matchMedia || window.matchMedia('(min-width: 1280px)').matches
+
 export default function DecisionExplorer({ result, question }) {
   const model = useMemo(() => buildModel(result), [result])
-  const [expanded, setExpanded] = useState(null)
+  const uid = useId().replace(/:/g, '')
+  // `dialog` is the maximised panel (was the inline focus area): 'evidence' | 'timeline' | 'agent:<key>' | null
+  const [dialog, setDialog] = useState(null)
+  // collapse state lives here (not inside the cards) so it survives the parent group collapsing/expanding
+  const [collapsed, setCollapsed] = useState({})
+  const [sidebarOpen, setSidebarOpen] = useState(isDesktop)
+  const [showAllEvidence, setShowAllEvidence] = useState(false)
+  const [showAllEvents, setShowAllEvents] = useState(false)
   const [hoverAgent, setHoverAgent] = useState(null)
   const [hoverEv, setHoverEv] = useState(null)
   const [focusEv, setFocusEv] = useState(null)
   const [selectedStep, setSelectedStep] = useState(null)
-  const flip = useFlip([expanded])
-  const focusRef = useRef(null)
   const h = model.h
 
-  const toggle = (id) => { flip.snapshot(); setExpanded((cur) => (cur === id ? null : id)) }
-  const openEvidence = (evId) => { setFocusEv(evId); flip.snapshot(); setExpanded('evidence') }
-  const close = () => { flip.snapshot(); setExpanded(null) }
-
-  useEffect(() => {
-    if (!expanded) return
-    const onKey = (e) => { if (e.key === 'Escape') close() }
-    window.addEventListener('keydown', onKey)
-    const el = focusRef.current
-    if (el) {
-      const r = el.getBoundingClientRect()
-      if (r.top < 0 || r.top > window.innerHeight * 0.6) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
-    return () => window.removeEventListener('keydown', onKey)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded])
+  const isCollapsed = (id) => !!collapsed[id]
+  const toggleCollapsed = (id) => setCollapsed((c) => ({ ...c, [id]: !c[id] }))
+  const openDialog = (id) => { if (id === 'evidence') setFocusEv(null); setDialog(id) }
+  const openEvidence = (evId) => { setFocusEv(evId); setDialog('evidence') }
+  const closeDialog = () => setDialog(null)
 
   if (!result?.harness) return <Empty>This response has no multi-agent state to visualise.</Empty>
 
@@ -491,15 +717,24 @@ export default function DecisionExplorer({ result, question }) {
   const ambiguityAgent = model.agents.find((a) => a.column === 'ambiguity')
   const ambLevel = ambiguityAgent?.report?.extras?.ambiguity_level
   const conflictCount = model.contradictions.length + (model.distinct.length > 1 ? model.distinct.length - 1 : 0)
-  const expandedAgent = expanded?.startsWith('agent:') ? model.agents.find((a) => `agent:${a.key}` === expanded) : null
+  const dialogAgent = dialog?.startsWith('agent:') ? model.agents.find((a) => `agent:${a.key}` === dialog) : null
   const usedByHover = hoverEv ? new Set(model.evidence.find((e) => e.evidence_id === hoverEv)?.used_by || []) : null
   const finished = model.spans.some((s) => s.stage === 'review_gate')
+  const sidebarId = `${uid}-sidebar`
+
+  const renderAgent = (a, extra = {}) => (
+    <AgentCard key={a.key} agent={a} result={result} model={model} uid={uid}
+      collapsed={isCollapsed(`agent:${a.key}`)} onToggleCollapse={() => toggleCollapsed(`agent:${a.key}`)}
+      onMaximize={() => openDialog(`agent:${a.key}`)} onEvidence={openEvidence}
+      highlighted={usedByHover?.has(a.key) || hoverAgent === a.key}
+      onHover={(on) => setHoverAgent(on ? a.key : null)} {...extra} />
+  )
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <section className="card p-4 sm:p-5">
-        <div className="flex flex-wrap items-start gap-4">
+    <div className="space-y-3">
+      {/* Header: question + global status */}
+      <section className="card p-3 sm:p-4">
+        <div className="flex flex-wrap items-start gap-3">
           <div className="flex-1 min-w-[240px]">
             <div className="flex flex-wrap items-center gap-2">
               <span className="eyebrow text-primary-700">Multi-agent decision explorer</span>
@@ -508,26 +743,21 @@ export default function DecisionExplorer({ result, question }) {
               {h.data_mode && <SourceBadge source={h.data_mode} />}
             </div>
             <div className="mt-2 flex gap-2 rounded-lg bg-primary-50/60 border border-primary-100 px-3 py-2">
-              <MessageSquareText size={16} className="text-primary-600 mt-0.5 shrink-0" />
-              <div className="min-w-0"><div className="text-[11px] text-muted">User question</div><p className="text-[14px] font-medium text-ink leading-snug break-words">{question || h.query_profile?.raw_query}</p></div>
+              <MessageSquareText size={16} className="text-primary-600 mt-0.5 shrink-0" aria-hidden />
+              <div className="min-w-0"><div className="text-[11px] text-muted">User question</div><p className="text-[13.5px] font-medium text-ink leading-snug break-words">{question || h.query_profile?.raw_query}</p></div>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            <ConfidenceRing value={result.confidence} />
-            <div><div className="eyebrow">Overall confidence</div><div className="text-[12px] text-muted max-w-[160px]">{h.confidence?.factors?.length ? `${h.confidence.factors.length} measured factors` : ''}</div></div>
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-3">
+              <ConfidenceRing value={result.confidence} size={56} />
+              <div><div className="eyebrow">Overall confidence</div><div className="text-[12px] text-muted max-w-[160px]">{h.confidence?.factors?.length ? `${h.confidence.factors.length} measured factors` : ''}</div></div>
+            </div>
+            <button type="button" onClick={() => setSidebarOpen((o) => !o)} aria-expanded={sidebarOpen} aria-controls={sidebarId}
+              className="btn-ghost border border-line px-2 py-1 text-[12px]">
+              {sidebarOpen ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+              {sidebarOpen ? 'Hide summary & evidence' : 'Show summary & evidence'}
+            </button>
           </div>
-        </div>
-        <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-          {model.verified && <Metric icon={FileCheck2} label="Verified hypothesis" value={model.verified} hint={h.predicted_label && h.predicted_label !== model.verified ? `final: ${h.predicted_label}` : undefined} />}
-          {model.initial.length > 0 && model.verified && (
-            <Metric icon={GitMerge} label="Agent consensus" value={`${model.agreeing.length}/${model.initial.length} agree`}
-              tone={model.agreeing.length === model.initial.length ? 'text-success-700' : 'text-warning-700'}
-              hint={h.verification?.agreement_without_evidence ? 'agreement without strong evidence' : model.distinct.length > 1 ? `${model.distinct.length} distinct findings` : 'independent agents agree'} />
-          )}
-          <Metric icon={AlertTriangle} label="Conflicts" value={conflictCount} tone={conflictCount ? 'text-danger-700' : 'text-ink'} hint={`${model.contradictions.length} contradicting signal(s)`} />
-          <Metric icon={Database} label="Evidence" value={`${model.evidence.length} records`} hint={`REAL ${comp.real ?? 0} · SYNTHETIC ${comp.synthetic ?? 0}`} />
-          {ambLevel && <Metric icon={HelpCircle} label="Ambiguity" value={ambLevel} tone={ambLevel === 'LOW' ? 'text-success-700' : ambLevel === 'HIGH' ? 'text-danger-700' : 'text-warning-700'} hint={`${ambiguityAgent.report.extras.flags?.length ?? 0} flag(s)`} />}
-          <Metric icon={RotateCcw} label="Feedback loop" value={`${h.feedback_rounds ?? 0} round(s)`} hint={`${cv.total_claims ?? 0} claims checked · ${cv.removed ?? 0} removed`} />
         </div>
         {!auto && h.review?.reasons?.length > 0 && (
           <div className="mt-3 flex gap-2 rounded-lg bg-warning-50 border border-warning-100 px-3 py-2 text-[12px] text-warning-700">
@@ -536,95 +766,96 @@ export default function DecisionExplorer({ result, question }) {
         )}
       </section>
 
-      {/* Focus area: the maximised panel */}
-      {expanded && (
-        <section ref={(el) => { focusRef.current = el; flip.register(expanded)(el) }}
-          className="rounded-xl border-2 border-primary-500 bg-white shadow-lift scroll-mt-4" aria-live="polite">
-          <header className="flex items-center justify-between gap-3 px-5 py-3 border-b border-line">
-            <div className="min-w-0">
-              {expandedAgent ? <AgentTitle agent={expandedAgent} /> : (
-                <div className="text-[14px] font-semibold text-ink">{expanded === 'evidence' ? 'Retrieved evidence' : 'Agent execution & interaction timeline'}</div>
+      <div className={cx('grid items-start gap-4', sidebarOpen && 'xl:grid-cols-[288px_minmax(0,1fr)] 2xl:grid-cols-[320px_minmax(0,1fr)]')}>
+        {/* LEFT: workflow summary + retrieved evidence (kept mounted when hidden so nothing is lost) */}
+        {/* below xl the column stacks above the workflow, so its sections pair up two-across instead of forming a tall strip */}
+        <aside id={sidebarId} hidden={!sidebarOpen}
+          className={cx('min-w-0', sidebarOpen ? 'grid content-start items-start gap-3 md:grid-cols-2 xl:grid-cols-1' : 'hidden')}
+          aria-label="Workflow summary, retrieved evidence and diagnostic charts">
+          <SidebarSection id={`${uid}-summary`} title="Workflow summary" icon={ListChecks}
+            collapsed={isCollapsed('sidebar:summary')} onToggle={() => toggleCollapsed('sidebar:summary')}>
+            <div className="divide-y divide-line">
+              {model.verified && <SummaryRow icon={FileCheck2} label="Verified hypothesis" value={model.verified} hint={h.predicted_label && h.predicted_label !== model.verified ? `final: ${h.predicted_label}` : undefined} />}
+              {model.initial.length > 0 && model.verified && (
+                <SummaryRow icon={GitMerge} label="Agent consensus" value={`${model.agreeing.length}/${model.initial.length} agree`}
+                  tone={model.agreeing.length === model.initial.length ? 'text-success-700' : 'text-warning-700'}
+                  hint={h.verification?.agreement_without_evidence ? 'agreement without strong evidence' : model.distinct.length > 1 ? `${model.distinct.length} distinct findings` : 'independent agents agree'} />
               )}
+              <SummaryRow icon={AlertTriangle} label="Conflicts" value={conflictCount} tone={conflictCount ? 'text-danger-700' : 'text-ink'} hint={`${model.contradictions.length} contradicting signal(s)`} />
+              <SummaryRow icon={Database} label="Evidence" value={`${model.evidence.length} records`} hint={`REAL ${comp.real ?? 0} · SYNTHETIC ${comp.synthetic ?? 0}`} />
+              {ambLevel && <SummaryRow icon={HelpCircle} label="Ambiguity" value={ambLevel} tone={ambLevel === 'LOW' ? 'text-success-700' : ambLevel === 'HIGH' ? 'text-danger-700' : 'text-warning-700'} hint={`${ambiguityAgent.report.extras.flags?.length ?? 0} flag(s)`} />}
+              <SummaryRow icon={RotateCcw} label="Feedback loop" value={`${h.feedback_rounds ?? 0} round(s)`} hint={`${cv.total_claims ?? 0} claims checked · ${cv.removed ?? 0} removed`} />
             </div>
-            <button type="button" onClick={close} className="btn-ghost border border-line px-2.5 py-1.5" aria-label="Minimize panel" title="Minimize (Esc)">
-              <Minimize2 size={14} /> <span className="hidden sm:inline">Minimize</span>
-            </button>
-          </header>
-          <div className="p-5 de-fade-up">
-            {expanded === 'evidence' && (
-              <div className="space-y-6">
-                {(h.sensor_view || []).length > 0 && <SensorPanel harness={h} />}
-                <EvidenceExplorer harness={h} focusId={focusEv} />
-              </div>
-            )}
-            {expandedAgent && <AgentDetail agent={expandedAgent} model={model} result={result} onEvidence={openEvidence} />}
-            {expanded === 'timeline' && (
-              <div className="space-y-6">
-                <Timeline model={model} selected={selectedStep} onSelect={setSelectedStep} />
-                <OrchestrationFlow harness={h} />
-                <AuditPanel harness={h} />
-              </div>
-            )}
-          </div>
-        </section>
-      )}
+          </SidebarSection>
 
-      {/* Pipeline grid */}
-      <div className={cx('grid gap-4 grid-cols-1 md:grid-cols-2', model.columns.length >= 4 ? 'xl:grid-cols-[1.1fr_repeat(4,minmax(0,1fr))]' : 'xl:grid-cols-[1.1fr_repeat(3,minmax(0,1fr))]')}>
+          <SidebarSection id={`${uid}-sensors`} title="Sensor health overview" icon={Gauge}
+            collapsed={isCollapsed('sidebar:sensors')} onToggle={() => toggleCollapsed('sidebar:sensors')}>
+            <SensorHealthChart harness={h} />
+          </SidebarSection>
+
+          <SidebarSection id={`${uid}-evidence`} title="Retrieved evidence bundle" icon={Database}
+            collapsed={isCollapsed('sidebar:evidence')} onToggle={() => toggleCollapsed('sidebar:evidence')}
+            highlighted={!!(hoverAgent && model.agents.find((a) => a.key === hoverAgent)?.evidenceUsed.length)}
+            actions={<MaximizeBtn label="retrieved evidence" onClick={() => openDialog('evidence')} />}>
+            <EvidenceCompact model={model} hoverAgent={hoverAgent} setHoverEv={setHoverEv} onEvidence={openEvidence}
+              showAll={showAllEvidence} setShowAll={setShowAllEvidence} listId={`${uid}-evlist`} />
+          </SidebarSection>
+
+          <SidebarSection id={`${uid}-hyps`} title="Fault hypothesis comparison" icon={BarChart3}
+            collapsed={isCollapsed('sidebar:hyps')} onToggle={() => toggleCollapsed('sidebar:hyps')}>
+            <HypothesisComparisonChart harness={h} decision={decision} />
+          </SidebarSection>
+        </aside>
+
+        {/* RIGHT: workflow stages, top to bottom */}
         <div className="min-w-0">
-          <div ref={flip.register('hdr:evidence')}><ColumnHeader n={1} title="Retrieved evidence" subtitle="Readings & retrieved records" /></div>
-          <Panel id="evidence" flip={flip} expanded={expanded} onToggle={(id) => { setFocusEv(null); toggle(id) }}
-            title={<div className="flex items-center gap-1.5 text-[13px] font-semibold text-ink"><Database size={14} className="text-primary-600" />Evidence bundle</div>}
-            highlighted={!!(hoverAgent && model.agents.find((a) => a.key === hoverAgent)?.evidenceUsed.length)}>
-            <EvidenceCompact model={model} hoverAgent={hoverAgent} setHoverEv={setHoverEv} dense={!!expanded} />
-          </Panel>
-        </div>
+          {model.columns.map((col, ci) => {
+            const n = ci + 1
+            const [title, subtitle] = COLUMN_TITLES[col.id]
+            return (
+              <div key={col.id}>
+                {ci > 0 && <Connector />}
+                {col.id === 'initial' ? (
+                  <InitialGroup n={n} title={title} subtitle={subtitle} agents={col.agents} model={model} uid={uid}
+                    collapsed={isCollapsed('group:initial')} onToggle={() => toggleCollapsed('group:initial')}
+                    renderCard={(a) => renderAgent(a)} />
+                ) : (
+                  <div className="space-y-2">{col.agents.map((a) => renderAgent(a, { wide: true, stage: { n, label: title } }))}</div>
+                )}
+              </div>
+            )
+          })}
 
-        {model.columns.map((col, ci) => (
-          <div key={col.id} className="min-w-0">
-            <div ref={flip.register(`hdr:${col.id}`)}><ColumnHeader n={ci + 2} title={COLUMN_TITLES[col.id][0]} subtitle={COLUMN_TITLES[col.id][1]} /></div>
-            <div className="space-y-3">
-              {col.agents.map((a) => (
-                <Panel key={a.key} id={`agent:${a.key}`} flip={flip} expanded={expanded} onToggle={toggle} accent={a.color}
-                  title={<AgentTitle agent={a} />} highlighted={usedByHover?.has(a.key) || hoverAgent === a.key}
-                  onHover={(on) => setHoverAgent(on ? a.key : null)}>
-                  <AgentCompact agent={a} result={result} model={model} dense={!!expanded} />
-                </Panel>
-              ))}
-            </div>
+          <div className="pt-4">
+            <TimelinePanel model={model} latency={h.latency_ms ?? model.totalMs} uid={uid}
+              collapsed={isCollapsed('timeline')} onToggle={() => toggleCollapsed('timeline')} onMaximize={() => openDialog('timeline')}
+              selected={selectedStep} onSelect={setSelectedStep} showAll={showAllEvents} setShowAll={setShowAllEvents} onEvidence={openEvidence} />
           </div>
-        ))}
+        </div>
       </div>
 
-      {/* Timeline */}
-      <Panel id="timeline" flip={flip} expanded={expanded} onToggle={toggle}
-        title={<div className="flex items-center gap-1.5 text-[13px] font-semibold text-ink"><Clock size={14} className="text-primary-600" />Agent interaction timeline</div>}
-        subtitle={`${model.spans.length} recorded events · ${fmtNum(h.latency_ms ?? model.totalMs, 0)} ms end-to-end · click a bar for details · click the header to expand`}>
-        <Timeline model={model} compact selected={selectedStep} onSelect={setSelectedStep} />
-        {selectedStep != null && (() => {
-          const s = model.spans.find((x) => x.step === selectedStep)
-          if (!s) return null
-          return (
-            <div className="mt-2 rounded-lg border border-line bg-slate-50 p-2 text-[12px]" onClick={(e) => e.stopPropagation()}>
-              <span className="mono text-muted">#{s.step}</span> <b className="text-ink">{s.stage}</b> · {s.action} · {fmtNum(s.duration_ms, 1)} ms
-              {s.reason && <div className="text-muted mt-0.5">{s.reason}</div>}
-              {s.evidence_used?.length > 0 && <div className="mt-1 flex flex-wrap gap-1">{s.evidence_used.map((id) => <IdChip key={id} id={id} onClick={openEvidence} />)}</div>}
+      {dialog && (
+        <Dialog contentKey={dialog} onClose={closeDialog}
+          title={dialogAgent ? <AgentTitle agent={dialogAgent} /> : (
+            <div className="text-[14px] font-semibold text-ink">{dialog === 'evidence' ? 'Retrieved evidence' : 'Agent execution & interaction timeline'}</div>
+          )}>
+          {dialog === 'evidence' && (
+            <div className="space-y-6">
+              {(h.sensor_view || []).length > 0 && <SensorPanel harness={h} />}
+              <EvidenceExplorer harness={h} focusId={focusEv} />
             </div>
-          )
-        })()}
-      </Panel>
-    </div>
-  )
-}
-
-function ColumnHeader({ n, title, subtitle }) {
-  return (
-    <div className="flex items-end justify-between gap-2 mb-2 px-1">
-      <div className="min-w-0">
-        <div className="text-[13px] font-semibold text-ink truncate">{n}. {title}</div>
-        <div className="text-[11px] text-muted truncate">{subtitle}</div>
-      </div>
-      <ChevronRight size={16} className="text-slate-300 shrink-0 hidden xl:block" aria-hidden />
+          )}
+          {dialogAgent && <AgentDetail agent={dialogAgent} model={model} result={result} onEvidence={openEvidence} />}
+          {dialog === 'timeline' && (
+            <div className="space-y-6">
+              <Timeline model={model} selected={selectedStep} onSelect={setSelectedStep} />
+              {selectedStep != null && <SelectedStep model={model} step={selectedStep} onEvidence={openEvidence} />}
+              <OrchestrationFlow harness={h} />
+              <AuditPanel harness={h} />
+            </div>
+          )}
+        </Dialog>
+      )}
     </div>
   )
 }
