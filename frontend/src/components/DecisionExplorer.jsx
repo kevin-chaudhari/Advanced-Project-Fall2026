@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { cx, pct, fmtNum, SourceBadge, DecisionBadge, StatusIcon, Cited, IdChip, Empty } from './ui'
 import EvidenceExplorer from './EvidenceExplorer'
+import AgentCouncil from './AgentCouncil'
 import OrchestrationFlow from './OrchestrationFlow'
 import { HypothesisPanel, ConfidencePanel, SensorPanel, AuditPanel } from './ReportPanels'
 import { SensorHealthChart, HypothesisComparisonChart } from './DiagnosticCharts'
@@ -46,7 +47,8 @@ function buildModel(result) {
   const agents = outputs.map((o, i) => {
     const key = keys.find((k) => reports[k]?.display_name === o.agent_name) ?? keys[i] ?? `agent_${i}`
     const report = reports[key] || null
-    const events = timeline.filter((e) => e.agent === key)
+    // council messages are not analysis passes: keep them out of status / pass counts (they stay on the timeline)
+    const events = timeline.filter((e) => e.agent === key && !(e.stage === 'council' && /deliberate/.test(e.action)))
     return {
       key, name: o.agent_name || report?.display_name || key, persona: o.agent_persona, emoji: o.agent_emoji,
       title: o.persona_title, mode: o.execution_mode || 'parallel', description: o.persona_description,
@@ -240,8 +242,14 @@ function AgentCompact({ agent, result, model, dense, wide, onEvidence }) {
     )
   }
 
+  const history = rep?.extras?.position_history
   const main = (
     <>
+      {rep?.extras?.revised_in_council && history?.length > 1 && (
+        <span className="chip self-start border-success-100 bg-success-50 text-success-700 text-[10px] py-0" title="Position changed after the agent council">
+          Revised in council: {history[0].label || 'none'} → {history[history.length - 1].label}
+        </span>
+      )}
       {!isFinal && agent.finding && <div className={cx('text-[13px] font-semibold text-ink leading-snug', !wide && 'line-clamp-2')}>{agent.finding}</div>}
       {isFinal ? (
         <>
@@ -821,6 +829,9 @@ export default function DecisionExplorer({ result, question }) {
                     renderCard={(a) => renderAgent(a)} />
                 ) : (
                   <div className="space-y-2">{col.agents.map((a) => renderAgent(a, { wide: true, stage: { n, label: title } }))}</div>
+                )}
+                {col.id === 'verification' && h.council && (
+                  <><Connector /><AgentCouncil harness={h} agents={model.agents} onEvidence={openEvidence} uid={uid} /></>
                 )}
               </div>
             )

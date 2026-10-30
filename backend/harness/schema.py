@@ -148,6 +148,30 @@ class AuditEvent(BaseModel):
     duration_ms: float = 0.0
 
 
+MessageKind = Literal["QUESTION", "CHALLENGE", "EVIDENCE_REQUEST", "EVIDENCE_SHARE", "POSITION_UPDATE",
+                      "CONCESSION", "HOLD", "RISK_FLAG", "HUMAN_INPUT_REQUEST", "SYNTHESIS"]
+
+
+class AgentMessage(BaseModel):
+    """One typed message on the agent council board (M-001 …).
+
+    Agents talk only through these messages.  A message may carry evidence /
+    derived-value IDs and a structured ``payload`` (e.g. a pairwise share) that
+    the council can act on; free text alone never changes a score.
+    """
+    message_id: str
+    round: int
+    sender: str
+    recipients: List[str] = Field(default_factory=list)      # agent keys; ["all"] = broadcast
+    kind: MessageKind
+    topic: str = ""                                          # e.g. "Bearing Wear vs Lubrication Degradation"
+    text: str
+    evidence_ids: List[str] = Field(default_factory=list)
+    in_reply_to: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    resolved: Optional[bool] = None                          # for QUESTION / CHALLENGE / requests
+
+
 class DiagnosticState(BaseModel):
     """Run-level context buffer shared by all agents (no long-term memory)."""
     run_id: str
@@ -179,6 +203,9 @@ class DiagnosticState(BaseModel):
     claim_checks: List[ClaimCheck] = Field(default_factory=list)
     review: Optional[ReviewGateResult] = None
 
+    messages: List[AgentMessage] = Field(default_factory=list)   # agent council board
+    council: Dict[str, Any] = Field(default_factory=dict)          # council summary (trigger, rounds, deltas)
+
     final_label: Optional[str] = None
     final_diagnosis: str = ""
     audit_trail: List[AuditEvent] = Field(default_factory=list)
@@ -189,6 +216,20 @@ class DiagnosticState(BaseModel):
 
     def derived_by_id(self) -> Dict[str, DerivedValue]:
         return {d.derived_id: d for d in self.derived}
+
+    def post(self, *, round: int, sender: str, kind: str, text: str, recipients: Optional[List[str]] = None,
+             topic: str = "", evidence_ids: Optional[List[str]] = None, in_reply_to: Optional[str] = None,
+             payload: Optional[Dict[str, Any]] = None, resolved: Optional[bool] = None) -> AgentMessage:
+        msg = AgentMessage(message_id=f"M-{len(self.messages) + 1:03d}", round=round, sender=sender,
+                           recipients=recipients or ["all"], kind=kind, topic=topic, text=text,
+                           evidence_ids=list(dict.fromkeys(evidence_ids or [])), in_reply_to=in_reply_to,
+                           payload=payload or {}, resolved=resolved)
+        self.messages.append(msg)
+        return msg
+
+    def inbox(self, agent: str, round: int) -> List[AgentMessage]:
+        return [m for m in self.messages if m.round == round and m.sender != agent
+                and (agent in m.recipients or "all" in m.recipients)]
 
     def add_derived(self, description: str, value: Optional[float] = None,
                     text: Optional[str] = None, inputs: Optional[List[str]] = None) -> str:

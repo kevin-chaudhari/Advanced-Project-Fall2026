@@ -41,7 +41,7 @@ CONSISTENCY_RULES: List[ConsistencyRule] = [
 ]
 
 PHYSICAL_BOUNDS = {
-    "temperature": (-40.0, 250.0), "vibration": (0.0, 1.0), "pressure": (0.0, 300.0),
+    "temperature": (-40.0, 250.0), "vibration": (0.0, 1.0), "pressure": (0.0, 6000.0),  # PSI; hydraulic circuits run ~2000-3000 PSI
     "rpm": (0.0, 20000.0), "current": (0.0, 1000.0), "voltage": (0.0, 1000.0), "flow_rate": (0.0, 2000.0),
 }
 
@@ -58,6 +58,9 @@ MAINTENANCE_GUIDANCE: Dict[str, str] = {
     "Seal Failure": "Inspect the mechanical seal for leakage and check seal flush/barrier fluid.",
     "Pump Cavitation": "Check suction conditions (NPSH available, suction strainer, inlet valve) and reduce flow demand if needed.",
     "Gearbox Degradation": "Inspect gear teeth and gearbox oil (debris analysis) and review the gearbox's operating hours.",
+    "Valve Switching Degradation": "Check the directional valve's switching response (solenoid, spool wear, contamination) against its specified switching time.",
+    "Internal Pump Leakage": "Measure pump volumetric efficiency / case-drain flow and inspect for worn internal clearances.",
+    "Accumulator Pressure Loss": "Check the accumulator pre-charge pressure with a charging kit and inspect the bladder or piston for gas loss.",
     "Normal Operation": "No corrective action indicated; continue routine condition monitoring.",
 }
 

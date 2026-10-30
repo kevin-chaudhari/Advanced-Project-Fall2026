@@ -80,6 +80,7 @@ def _bg_save_analysis(question: str, dataset: str, result: dict) -> None:
 async def health():
     return HealthResponse(
         status="ok", failure_iq_loaded=_loaded("failure_iq"), afrb_loaded=_loaded("afrb"),
+        hydraulic_loaded=_loaded("hydraulic"),
         message="Industrial Diagnostic AI System is running",
         data_modes={k: kb.available_modes() for k, kb in (runtime.kbs.items() if runtime else [])},
         record_counts={k: {st: len(p.records) for st, p in kb.partitions.items()} for k, kb in (runtime.kbs.items() if runtime else [])},
@@ -124,6 +125,10 @@ async def load_data(dataset_type: str = "failure_iq", file: UploadFile | None = 
             if rebuild:
                 runtime.store.persist_path.joinpath(f"{INDEX_NAMES[('afrb', 'real')]}.faiss").unlink(missing_ok=True)
             kb = runtime.load_afrb(real_csv=real_csv)
+        elif dataset_type == "hydraulic":
+            if rebuild:
+                runtime.store.persist_path.joinpath("hydraulic.faiss").unlink(missing_ok=True)
+            kb = runtime.load_hydraulic()
         else:
             raise HTTPException(status_code=400, detail=f"Unknown dataset_type '{dataset_type}'.")
         for m in kb.available_modes():

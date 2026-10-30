@@ -25,11 +25,15 @@ logger = setup_logger(__name__)
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_SYNTHETIC_CSV = BACKEND_DIR / "data" / "synthetic" / "afrb_synthetic.csv"
+# Real measured cycles from the UCI hydraulic test rig (built by data/real/build_hydraulic_kb.py).
+# Kept as its own knowledge base: its units (bar→PSI, mm/s) and reference bands must not mix with AFRB.
+DEFAULT_HYDRAULIC_CSV = BACKEND_DIR / "data" / "real" / "hydraulic_rig_cycles.csv"
 
 INDEX_NAMES = {
     ("afrb", "real"): "afrb",
     ("afrb", "synthetic"): "afrb_synthetic",
     ("failure_iq", "real"): "failure_iq",
+    ("hydraulic", "real"): "hydraulic",
 }
 
 
@@ -88,6 +92,19 @@ class Runtime:
         self.kbs["afrb"] = kb
         return kb
 
+    def load_hydraulic(self, csv_path: Optional[str] = None, allow_build: bool = True) -> KnowledgeBase:
+        """REAL-only knowledge base of measured hydraulic-rig load cycles (UCI #447)."""
+        csv_path = csv_path or os.getenv("HYDRAULIC_CSV_PATH", str(DEFAULT_HYDRAULIC_CSV))
+        if not Path(csv_path).exists():
+            raise FileNotFoundError(f"Hydraulic CSV not found at {csv_path}; run data/real/build_hydraulic_kb.py")
+        kb = KnowledgeBase("hydraulic")
+        loader = AFRBLoader(csv_path, default_source_type="real")   # the CSV uses the AFRB column schema
+        recs = loader.load_records("hydraulic")
+        self.data_quality["hydraulic_real"] = loader.quality
+        self._attach_partition(kb, "real", recs, allow_build)
+        self.kbs["hydraulic"] = kb
+        return kb
+
     def load_failure_iq(self, allow_build: bool = True) -> KnowledgeBase:
         kb = KnowledgeBase("failure_iq")
         recs = FailureIQLoader().load_records()
@@ -117,7 +134,8 @@ class Runtime:
                                                    exclude_record_ids=list(exclude_record_ids))
 
 
-def build_runtime(load_afrb: bool = True, load_failure_iq: bool = True, allow_build: bool = True) -> Runtime:
+def build_runtime(load_afrb: bool = True, load_failure_iq: bool = True, allow_build: bool = True,
+                  load_hydraulic: bool = True) -> Runtime:
     from agents.orchestrator import AgentOrchestrator
     rt = Runtime()
     rt.embedder = Embedder()
@@ -132,6 +150,11 @@ def build_runtime(load_afrb: bool = True, load_failure_iq: bool = True, allow_bu
             rt.load_failure_iq(allow_build=allow_build)
         except Exception as exc:
             logger.warning("Failure IQ knowledge base unavailable: %s", exc)
+    if load_hydraulic and Path(os.getenv("HYDRAULIC_CSV_PATH", str(DEFAULT_HYDRAULIC_CSV))).exists():
+        try:
+            rt.load_hydraulic(allow_build=allow_build)
+        except Exception as exc:
+            logger.warning("Hydraulic knowledge base unavailable: %s", exc)
     for kb in rt.kbs.values():               # warm up reference statistics / calibration
         for m in kb.available_modes():
             kb.reference(m)

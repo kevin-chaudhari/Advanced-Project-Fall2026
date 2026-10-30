@@ -24,6 +24,12 @@ Query → query preparation → multi-stage RAG (semantic · metadata · numeric
 * Confidence is computed from visible factors; agreement never substitutes for evidence.
 * `AUTO_RESOLVE` vs `REQUIRES_HUMAN_REVIEW` is decided by explicit criteria (G1–G8).
 * Works with OpenAI, Ollama, or **no LLM at all** (deterministic agents).
+* **Agent council** for hard cases: when provisional confidence is below 0.65, the runner-up is within 0.15,
+  or the first-pass agents disagree, all six agents talk through typed messages (question, challenge,
+  evidence share, concession, hold, risk flag, human-input request, synthesis). Each keeps its persona and
+  method. Confidence is recomputed with the same factor formula and can only move on evidence: a pair is
+  re-weighted only when two independent checks (signature and focused precedent) agree, at 25 % strength.
+  Settings: `COUNCIL_MODE=auto|always|off`, `COUNCIL_MAX_ROUNDS` (2). Code: `harness/council.py`.
 
 ## Data
 
@@ -31,6 +37,7 @@ Query → query preparation → multi-stage RAG (semantic · metadata · numeric
 |---|---|---|---|
 | AFRB sensor records | 50,000 | 6,350 | 7 sensor channels; synthetic adds normal, seal, cavitation, gearbox, severity levels, missing-sensor, ambiguous and contradictory cases |
 | FailureSensorIQ | 5,629 | — | sensor ↔ failure-event relevance (text) |
+| Hydraulic test rig (UCI #447) | 2,205 | — | real measured 60 s load cycles; temperature, vibration (mm/s), pressure, flow; own index and reference bands — see `backend/data/real/README.md` |
 
 Synthetic rows are generated deterministically by
 `backend/data_generator/synthetic_industrial_generator.py`, carry

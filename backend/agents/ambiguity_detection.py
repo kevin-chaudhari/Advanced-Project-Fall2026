@@ -107,6 +107,73 @@ class AmbiguityDetectionAgent(BaseAgent):
                                    "missing_key_sensors": missing_key, "consistency_violations": violations,
                                    "synthetic_share": round(synth_share, 3)})
 
+    # ── council: open the agenda ──────────────────────────────────────────
+    def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
+        """Turn each measured uncertainty source into a question for the agent that owns it.
+
+        Persona: the uncertainty specialist does not answer the questions herself;
+        she routes them, and anything agents cannot resolve goes to a person.
+        """
+        from harness.council import contested_pair
+        rep = state.ambiguity_output
+        if not rep:
+            return []
+        kinds = {f.split(":")[0] for f in rep.extras.get("flags", [])}
+        pair = contested_pair(state)
+        posted = []
+        asked = {(m.payload.get("need"), tuple(m.payload.get("pair") or ())) for m in state.messages if m.sender == self.key}
+
+        def new_q(need, p=None):
+            return (need, tuple(p or ())) not in asked
+        if "MULTIPLE_PLAUSIBLE_DIAGNOSES" in kinds and pair and new_q("separate", pair):
+            a, b = pair
+            posted.append(state.post(round=round_no, sender=self.key, kind="QUESTION",
+                                     recipients=["diagnostic_expert", "pattern_agent"], topic=f"{a} vs {b}",
+                                     text=f"{a} and {b} are too close to call. Which reported channels separate them, "
+                                          f"and what does precedent on those channels say?",
+                                     payload={"need": "separate", "pair": [a, b]}))
+        elif pair and state.confidence and state.confidence.confidence < 0.65 and new_q("separate", pair):
+            a, b = pair
+            weakest = min(state.confidence.factors, key=lambda f: f.value) if state.confidence.factors else None
+            posted.append(state.post(round=round_no, sender=self.key, kind="QUESTION",
+                                     recipients=["diagnostic_expert", "pattern_agent"], topic=f"{a} vs {b}",
+                                     text=(f"Confidence is only {state.confidence.confidence:.2f}"
+                                           + (f" (weakest factor: {weakest.name.replace('_', ' ')})" if weakest else "")
+                                           + f". Does the evidence on the separating channels confirm {a} over {b}?"),
+                                     payload={"need": "separate", "pair": [a, b]}))
+        if "CONFLICTING_EVIDENCE" in kinds and new_q("contradiction_review"):
+            ids = [i for c in state.contradictions for i in c.evidence_ids][:4]
+            posted.append(state.post(round=round_no, sender=self.key, kind="QUESTION", recipients=["verification"],
+                                     topic="contradicting signals", evidence_ids=ids,
+                                     text=f"{len(state.contradictions)} signal(s) contradict the leading hypothesis. "
+                                          f"Do they count against the runner-up as well?",
+                                     payload={"need": "contradiction_review"}))
+        if "SYNTHETIC_RELIANCE" in kinds and pair and new_q("real_precedent", pair):
+            posted.append(state.post(round=round_no, sender=self.key, kind="QUESTION", recipients=["pattern_agent"],
+                                     topic="REAL precedent", text="Most evidence is SYNTHETIC. What do REAL cases alone say?",
+                                     payload={"need": "real_precedent", "pair": list(pair)}))
+        if "LOW_QUALITY_DATA" in kinds and new_q("instrumentation"):
+            posted.append(state.post(round=round_no, sender=self.key, kind="QUESTION", recipients=["aggressive_agent"],
+                                     topic="instrumentation", text="Readings break a consistency rule. Is the instrumentation trustworthy?",
+                                     payload={"need": "instrumentation"}))
+        if "AGREEMENT_WITHOUT_EVIDENCE" in kinds and new_q("agreement_check"):
+            posted.append(state.post(round=round_no, sender=self.key, kind="QUESTION", recipients=["verification"],
+                                     topic="agreement", text="The agents agree but the evidence score is low. Is the agreement backed by evidence?",
+                                     payload={"need": "agreement_check"}))
+        missing = rep.extras.get("missing_key_sensors", [])
+        if missing and round_no == 1:
+            posted.append(state.post(round=round_no, sender=self.key, kind="HUMAN_INPUT_REQUEST",
+                                     recipients=["human_review_coordinator"], topic="missing channels",
+                                     text="No agent can recover unmeasured channels: " + ", ".join(missing)
+                                          + " must be measured on the asset.",
+                                     payload={"channels": missing}))
+        if "INSUFFICIENT_EVIDENCE" in kinds and round_no == 1:
+            posted.append(state.post(round=round_no, sender=self.key, kind="HUMAN_INPUT_REQUEST",
+                                     recipients=["human_review_coordinator"], topic="readings",
+                                     text="The question carries too few numeric readings for the agents to settle this.",
+                                     payload={"channels": []}))
+        return posted
+
     def llm_task(self, state, ctx, report, **_):
         return ("Summarise the uncertainty for an operator in 2-3 sentences. Return JSON {\"narrative\": str}. "
                 "Do not introduce new numbers; refer to evidence IDs where relevant.")

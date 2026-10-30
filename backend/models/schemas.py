@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=3, description="Natural language diagnostic question")
-    dataset_type: str = Field(..., description="'failure_iq' or 'afrb'")
+    dataset_type: str = Field(..., description="'failure_iq', 'afrb' or 'hydraulic'")
     top_k: int = Field(default=8, ge=1, le=20, description="Number of evidence records in the initial bundle")
     data_mode: str = Field(default="combined", description="'real' | 'synthetic' | 'combined' (falls back to what the dataset supports)")
 
@@ -206,6 +206,7 @@ class HealthResponse(BaseModel):
     status: str
     failure_iq_loaded: bool
     afrb_loaded: bool
+    hydraulic_loaded: bool = False
     message: str
     data_modes: Dict[str, List[str]] = Field(default_factory=dict)
     record_counts: Dict[str, Dict[str, int]] = Field(default_factory=dict)

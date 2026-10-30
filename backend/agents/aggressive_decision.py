@@ -125,3 +125,59 @@ class AggressiveDecisionAgent(BaseAgent):
                            recommendation=guidance_for(label) if label else guidance_for(None),
                            extras={"rapid_signal": signal, "severity": severity, "rules_fired": rules_fired,
                                    "out_of_band": directions, "consistency_violations": violations})
+
+    # ── council: rules-only answers ─────────────────────────────────────────
+    def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
+        """Persona: fast, safety-first triage officer with no LLM. He never argues from data he does not
+        use: on a challenge he checks the proposed label against his own rule outputs, defers on the label
+        only if it fits every out-of-band direction, and never drops a safety signal."""
+        rep = state.rapid_triage_output
+        if not rep:
+            return []
+        posted = []
+        violations = rep.extras.get("consistency_violations") or []
+        directions = rep.extras.get("out_of_band") or {}
+        severity = rep.extras.get("severity")
+        for m in state.inbox(self.key, round_no):
+            if m.kind == "CHALLENGE":
+                proposed, mine = m.payload["verified"], m.payload["your_label"]
+                if violations:
+                    posted.append(state.post(round=round_no, sender=self.key, kind="HOLD", recipients=[m.sender, "all"],
+                                             topic=m.topic, in_reply_to=m.message_id,
+                                             text=("Safety first: " + "; ".join(f"{v['rule_id']} {v['description']}" for v in violations)
+                                                   + ". The readings themselves are suspect, so I keep 'verify instrumentation first'."),
+                                             payload={"label": mine, "rules": [v["rule_id"] for v in violations]}))
+                    continue
+                ks = dict(key_sensors(proposed, ctx.ref))
+                match = [s_ for s_, d in directions.items() if s_ in ks and ((ks[s_] > 0) == (d == "high"))]
+                clash = [s_ for s_, d in directions.items() if s_ in ks and ((ks[s_] > 0) != (d == "high"))]
+                if match and not clash:
+                    posted.append(state.post(round=round_no, sender=self.key, kind="CONCESSION", recipients=[m.sender, "all"],
+                                             topic=m.topic, in_reply_to=m.message_id,
+                                             text=(f"R-SIG check: {proposed} fits every out-of-band direction "
+                                                   f"({', '.join(sensor_name(x) for x in match)}) with no clash. I defer on the label "
+                                                   f"and keep severity {severity}."),
+                                             payload={"new_label": proposed, "old_label": mine, "severity": severity}))
+                else:
+                    why = (f"its signature clashes with {', '.join(sensor_name(x) for x in clash)}" if clash else
+                           "none of my out-of-band channels belongs to its signature" if directions else
+                           "my rules see no channel outside its reference band")
+                    posted.append(state.post(round=round_no, sender=self.key, kind="HOLD", recipients=[m.sender, "all"],
+                                             topic=m.topic, in_reply_to=m.message_id,
+                                             text=f"R-SIG check: I cannot confirm {proposed}: {why}. My rapid signal stays {mine}.",
+                                             payload={"label": mine, "clash": clash}))
+            elif m.kind == "QUESTION" and m.payload.get("need") == "instrumentation":
+                posted.append(state.post(round=round_no, sender=self.key, kind="RISK_FLAG",
+                                         recipients=["human_review_coordinator", m.sender], topic="instrumentation",
+                                         in_reply_to=m.message_id, resolved=None,
+                                         text=("Instrumentation is not trustworthy: " + "; ".join(f"{v['rule_id']} observed {v['observed']}" for v in violations)
+                                               + ". Verify the sensors before acting on any diagnosis.") if violations
+                                         else "No consistency rule fired; the instrumentation looks plausible.",
+                                         payload={"rules": [v["rule_id"] for v in violations]}))
+                m.resolved = True
+        if round_no == 1 and severity in ("HIGH", "CRITICAL"):
+            posted.append(state.post(round=round_no, sender=self.key, kind="RISK_FLAG", recipients=["human_review_coordinator"],
+                                     topic="severity", text=f"Severity triage {severity}: whatever the label, do not delay the inspection.",
+                                     payload={"severity": severity}))
+        return posted
+

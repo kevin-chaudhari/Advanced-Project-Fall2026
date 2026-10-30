@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { Activity, Database, LayoutDashboard, Home, Factory, Menu, X } from 'lucide-react'
+import { Activity, Database, LayoutDashboard, Home, Factory, Menu, X, Gauge } from 'lucide-react'
 import { cx } from './ui'
 
 const NAV = [
   { to: '/', label: 'Overview', icon: Home, end: true },
   { to: '/diagnose/afrb', label: 'Diagnose · AFRB sensors', icon: Activity },
   { to: '/diagnose/failure_iq', label: 'Diagnose · FailureSensorIQ', icon: Database },
+  { to: '/diagnose/hydraulic', label: 'Diagnose · Hydraulic rig (real)', icon: Gauge },
   { to: '/analysis', label: 'Data & evaluation', icon: LayoutDashboard },
 ]
 

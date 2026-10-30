@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from agents.base_agent import AgentContext, BaseAgent
+from harness.canonical import SENSOR_SPECS
 from harness.claims import ClaimValidator
 from harness.review_gate import evaluate_gate
 from harness.rules import guidance_for
@@ -120,6 +121,10 @@ class HumanReviewCoordinatorAgent(BaseAgent):
         state.final_diagnosis = diag
 
         recommendation = guidance_for(label if not insufficient else None)
+        human_inputs = state.council.get("human_inputs") or []
+        if human_inputs:
+            recommendation += (" To settle the open question, measure: "
+                               + ", ".join(SENSOR_SPECS[c]["label"].lower() for c in human_inputs if c in SENSOR_SPECS) + ".")
         if gate.decision == "REQUIRES_HUMAN_REVIEW":
             recommendation = "Human review required before acting. " + recommendation
         return AgentReport(agent=self.key, display_name=self.role, finding=diag, finding_label=final_label,
@@ -149,11 +154,45 @@ class HumanReviewCoordinatorAgent(BaseAgent):
         if state.feedback_rounds:
             codes = sorted({d.code for ds in state.deficiencies_history for d in ds if d.action != "none"})
             steps.append(f"Feedback loop — {state.feedback_rounds} targeted round(s) addressing {', '.join(codes)}.")
+        if state.council.get("convened"):
+            c = state.council
+            moved = ", ".join(f"{p['agent_name']} {p['from']} → {p['to']}" for p in c.get("position_changes", [])) or "none"
+            steps.append(f"Agent council — {len(state.messages)} messages over {c.get('rounds', 0)} round(s); "
+                         f"confidence {c.get('confidence_before_id', '')} → {c.get('confidence_after_id', '')}; "
+                         f"position changes: {moved}.")
         if state.verification_output:
             steps.append(f"Verification — {state.verification_output.narrative}")
         if state.ambiguity_output:
             steps.append(f"Ambiguity — {state.ambiguity_output.narrative}")
         return [f"Step {i + 1}: {s}" for i, s in enumerate(steps)]
+
+    # ── council: synthesis ──────────────────────────────────────────────────
+    def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
+        """Persona: plant operations director. Closes the council: what was settled, what changed,
+        and which items only a person on site can resolve. She does not change the gate criteria."""
+        msgs = state.messages
+        asks = [m for m in msgs if m.kind in ("QUESTION", "CHALLENGE", "EVIDENCE_REQUEST")]
+        settled = sum(1 for m in asks if m.resolved)
+        channels: List[str] = []
+        for m in msgs:
+            if m.kind == "HUMAN_INPUT_REQUEST":
+                for ch in m.payload.get("channels", []):
+                    if ch not in channels:
+                        channels.append(ch)
+        state.council["human_inputs"] = channels
+        risks = [m.text for m in msgs if m.kind == "RISK_FLAG"]
+        c = state.council
+        moved = "; ".join(f"{p['agent_name']}: {p['from']} → {p['to']}" for p in c.get("position_changes", []))
+        text = (f"Council closed after {c.get('rounds', 0)} round(s): {settled} of {len(asks)} questions/challenges settled. "
+                f"Confidence {c.get('confidence_before', 0):.2f} → {c.get('confidence_after', 0):.2f} "
+                f"[{c.get('confidence_before_id', '')}, {c.get('confidence_after_id', '')}]"
+                + (f"; position changes: {moved}" if moved else "; no agent changed position")
+                + (f". Needs a person on site: measure {', '.join(SENSOR_SPECS[x]['label'].lower() for x in channels if x in SENSOR_SPECS)}" if channels else "")
+                + (f". {len(risks)} risk flag(s) carried to the review gate" if risks else "")
+                + ". The review gate still decides on its explicit criteria.")
+        return [state.post(round=round_no, sender=self.key, kind="SYNTHESIS", recipients=["all"], topic="council outcome",
+                           text=text, evidence_ids=[i for i in (c.get("confidence_before_id"), c.get("confidence_after_id")) if i],
+                           payload={"human_inputs": channels, "settled": settled, "asked": len(asks)})]
 
     def llm_task(self, state, ctx, report, **_):
         return ("Rewrite the direct answer for a plant operator in <= 2 sentences, keeping the verified label, "

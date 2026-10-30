@@ -76,6 +76,15 @@ class BaseAgent(ABC):
 
     uses_llm: bool = True
 
+    # ── agent council (see harness/council.py) ──────────────────────────────
+    def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools: Any) -> List[Any]:
+        """Read this round's inbox on the council board and post replies.
+
+        Agents speak only through ``state.post(...)``; each persona decides what
+        to say with its own method.  Default: stay silent.
+        """
+        return []
+
     def deterministic(self, state: DiagnosticState, ctx: AgentContext, **kwargs) -> AgentReport:
         raise NotImplementedError(f"{self.__class__.__name__} does not implement the harness API")
 

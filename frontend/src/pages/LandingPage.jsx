@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Activity, Database, ArrowRight, GitBranch, ShieldCheck, Search, FileCheck2 } from 'lucide-react'
+import { Activity, Database, ArrowRight, GitBranch, ShieldCheck, Search, FileCheck2, Gauge } from 'lucide-react'
 import AppShell from '../components/AppShell'
 import { StatTile, pct, fmtNum } from '../components/ui'
 import { checkHealth, getEvaluation } from '../services/api'
@@ -22,6 +22,7 @@ export default function LandingPage() {
   useEffect(() => { checkHealth().then(setHealth).catch(() => setHealth({ offline: true })); getEvaluation().then(setEv).catch(() => {}) }, [])
   const afrb = health?.record_counts?.afrb || {}
   const fiq = health?.record_counts?.failure_iq || {}
+  const hyd = health?.record_counts?.hydraulic || {}
   const h = ev?.harness_combined?.summary, b = ev?.baseline?.summary
 
   return (
@@ -63,10 +64,11 @@ export default function LandingPage() {
           </div>
         </section>
 
-        <section className="grid gap-4 md:grid-cols-2">
+        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {[
             { id: 'afrb', icon: Activity, t: 'AFRB sensor diagnosis', d: 'Seven sensor channels per record. Real, synthetic or combined knowledge base.', c: afrb, ok: health?.afrb_loaded },
             { id: 'failure_iq', icon: Database, t: 'FailureSensorIQ relevance', d: 'Which failure events relate to which sensors, per equipment type (text knowledge base).', c: fiq, ok: health?.failure_iq_loaded },
+            { id: 'hydraulic', icon: Gauge, t: 'Hydraulic rig diagnosis', d: 'Real measured load cycles (UCI #447 test rig): temperature, vibration, pressure and flow with recorded component conditions.', c: hyd, ok: health?.hydraulic_loaded },
           ].map(({ id, icon: Icon, t, d, c, ok }) => (
             <button key={id} onClick={() => nav(`/diagnose/${id}`)} className="card p-5 text-left hover:shadow-lift transition-shadow">
               <div className="flex items-center justify-between"><Icon size={18} className="text-primary-600" /><span className={`text-[11px] ${ok ? 'text-success-700' : 'text-warning-700'}`}>{health?.offline ? 'backend offline' : ok ? '● ready' : '● not loaded'}</span></div>

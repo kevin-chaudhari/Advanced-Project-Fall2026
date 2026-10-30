@@ -44,6 +44,11 @@ from agents.system_analysis_agent import SystemAnalysisAgent
 from agents.verification_analyst import VerificationAnalystAgent
 from harness.analysis import critical_sensors, failure_iq_candidates, score_hypotheses, sensor_assessment
 from harness.audit import AuditRecorder
+from harness.council import (COUNCIL_MAX_ROUNDS, FIRST_PASS, REPORT_SLOT, CouncilTools, apply_pair_resolution,
+                             mark_resolved, pair_key, profile_with_channels, should_convene)
+from harness.council import summary as council_summary
+import harness.council as _council_mod
+from harness.statements import derived_id
 from harness.canonical import SENSOR_SPECS, fmt_sensor
 from harness.claims import ClaimValidator
 from harness.knowledge_base import KnowledgeBase
@@ -209,8 +214,17 @@ class AgentOrchestrator:
                 await self._run_agent(key, state, ctx, audit, stage="targeted_rerun", status="loop", **kwargs)
             await self._run_agent("verification", state, ctx, audit, stage="verification", status="loop")
 
-        # 6 ── ambiguity, final coordinator + gate
+        # 6 ── ambiguity (provisional when a council follows)
         await self._run_agent("ambiguity", state, ctx, audit, stage="ambiguity")
+
+        # 7 ── agent council: agents talk to each other when the case is hard
+        convene, why = should_convene(state, ctx.kb.has_numeric())
+        if convene:
+            await self._run_council(state, ctx, audit, retriever, why)
+        else:
+            state.council["reasons"] = why
+
+        # 8 ── final coordinator + gate
         await self._run_agent("human_review_coordinator", state, ctx, audit, stage="final_coordinator")
         audit.note("claim_validation", "validate_final_claims",
                    reason=f"{ClaimValidator(state, known_labels).summary()}")
@@ -221,6 +235,145 @@ class AgentOrchestrator:
 
         latency_ms = (time.perf_counter() - t_start) * 1000
         return self._build_response(state, ctx, kb, latency_ms)
+
+    # ── agent council ────────────────────────────────────────────────────────
+    async def _run_council(self, state: DiagnosticState, ctx: AgentContext, audit: AuditRecorder,
+                           retriever: MultiStageRetriever, reasons: List[str]) -> None:
+        ver = state.verification_output
+        before = state.confidence.confidence if state.confidence else 0.0
+        state.council.update({
+            "convened": True, "reasons": reasons, "confidence_before": before,
+            "verified_before": ver.extras.get("verified_label") if ver else None,
+            "first_pass_findings": {k: (getattr(state, REPORT_SLOT[k]).finding_label if getattr(state, REPORT_SLOT[k]) else None)
+                                    for k in FIRST_PASS},
+            "position_changes": [],
+        })
+        state.council["confidence_before_id"] = derived_id(state, "council:confidence_before",
+                                                           "Measured confidence before the agent council", value=before)
+        audit.note("council", "convene", reason="; ".join(reasons), status="loop")
+        tools = CouncilTools(
+            focused_precedent=lambda st, pair, chans, mode=None: self._focused_precedent(st, ctx, retriever, pair, chans, mode),
+            request_label_evidence=lambda label: self._council_label_evidence(state, retriever, label),
+            reported_channels=sorted(state.profile.sensors) if state.profile else [])
+        order = ["ambiguity", "verification", "diagnostic_expert", "pattern_agent", "aggressive_agent"]
+        last_round = 0
+        for r in range(1, COUNCIL_MAX_ROUNDS + 1):
+            last_round = r
+            ev_before = len(state.evidence)
+            for key in order:
+                t0 = time.perf_counter()
+                n0 = len(state.messages)
+                try:
+                    self.agents[key].deliberate(state, ctx, r, tools)
+                except Exception as exc:            # a council failure never breaks the diagnosis
+                    logger.exception("Council: %s failed", key)
+                    audit.note("council", f"{key}.deliberate", reason=str(exc)[:200], status="error", agent=key)
+                    continue
+                new = state.messages[n0:]
+                if new:
+                    audit.note("council", f"{key}.deliberate (round {r})", agent=key, status="ok",
+                               reason="; ".join(f"{m.message_id} {m.kind}" for m in new)[:200],
+                               evidence_used=list(dict.fromkeys(i for m in new for i in m.evidence_ids))[:12])
+                    state.audit_trail[-1].duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+            # act on structured payloads only
+            changed = len(state.evidence) > ev_before     # re-verify on new evidence …
+            material = False                                # … but only a real shift earns another round
+            shares: Dict[str, Dict] = {}
+            for m in state.messages:
+                if m.round != r or "pair" not in m.payload:
+                    continue
+                a, b = m.payload["pair"]
+                slot = shares.setdefault(pair_key(a, b), {"pair": (a, b), "shares": {}})
+                if m.payload.get("signature_share") and not m.payload.get("already_applied"):
+                    slot["shares"]["signature"] = m.payload["signature_share"]
+                if m.payload.get("precedent_share"):
+                    slot["shares"]["precedent"] = m.payload["precedent_share"]
+            for item in shares.values():
+                a, b = item["pair"]
+                res = apply_pair_resolution(state, a, b, item["shares"], r)
+                if res:
+                    changed = material = True
+                    audit.note("council", "joint_pair_resolution", status="loop", evidence_used=[res["derived_id"]],
+                               reason=(f"{a} vs {b}: joint share {res['joint_share'][a]:.2f} from {', '.join(res['sources'])}; "
+                                       f"scores {res['before'][a]:.2f}/{res['before'][b]:.2f} → {res['after'][a]:.2f}/{res['after'][b]:.2f}"))
+            for m in state.messages:
+                if m.round == r and m.kind == "CONCESSION" and m.payload.get("new_label") and _council_mod.COUNCIL_CONCESSIONS:
+                    rep = getattr(state, REPORT_SLOT[m.sender])
+                    old = rep.finding_label
+                    rep.extras.setdefault("position_history", [{"round": 0, "label": old}]).append(
+                        {"round": r, "label": m.payload["new_label"], "message": m.message_id})
+                    rep.finding_label = m.payload["new_label"]
+                    rep.finding = m.payload["new_label"] if m.sender == "pattern_agent" else \
+                        f"{m.payload['new_label']} (label deferred in council; severity {m.payload.get('severity')})"
+                    rep.extras["revised_in_council"] = True
+                    state.council["position_changes"].append({"agent": m.sender, "agent_name": PERSONA_CATALOG[m.sender]["agent_name"],
+                                                              "from": old, "to": rep.finding_label, "round": r,
+                                                              "message": m.message_id})
+                    changed = material = True
+            if changed:
+                de_before = state.diagnostic_expert_output.finding_label if state.diagnostic_expert_output else None
+                await self._run_agent("diagnostic_expert", state, ctx, audit, stage="council", status="loop")
+                de_after = state.diagnostic_expert_output.finding_label
+                if de_after != de_before:
+                    msg = state.post(round=r, sender="diagnostic_expert", kind="POSITION_UPDATE", recipients=["all"],
+                                     topic=f"{de_before} → {de_after}",
+                                     text=f"Re-scored with the evidence shared in the council, my leading hypothesis is now {de_after} (was {de_before}).",
+                                     evidence_ids=state.diagnostic_expert_output.evidence_ids[:3],
+                                     payload={"new_label": de_after, "old_label": de_before})
+                    state.council["position_changes"].append({"agent": "diagnostic_expert", "agent_name": "Diagnostic Expert",
+                                                              "from": de_before, "to": de_after, "round": r,
+                                                              "message": msg.message_id})
+                await self._run_agent("verification", state, ctx, audit, stage="council", status="loop")
+                await self._run_agent("ambiguity", state, ctx, audit, stage="council", status="loop")
+            mark_resolved(state, r)
+            state.council["rounds"] = r
+            if not material or not should_convene(state, ctx.kb.has_numeric())[0]:
+                break
+
+        after = state.confidence.confidence if state.confidence else 0.0
+        ver = state.verification_output
+        state.council.update({"confidence_after": after,
+                              "verified_after": ver.extras.get("verified_label") if ver else None})
+        state.council["confidence_after_id"] = derived_id(state, "council:confidence_after",
+                                                          "Measured confidence after the agent council", value=after)
+        t0 = time.perf_counter()
+        self.human_review_coordinator.deliberate(state, ctx, last_round, tools)
+        audit.note("council", "human_review_coordinator.deliberate (synthesis)", agent="human_review_coordinator",
+                   status="ok", reason=state.messages[-1].text[:200] if state.messages else "")
+        state.audit_trail[-1].duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+    def _focused_precedent(self, state: DiagnosticState, ctx: AgentContext, retriever: MultiStageRetriever,
+                           pair: List[str], channels: List[str], mode: Optional[str] = None) -> Optional[Dict]:
+        """Nearest-case vote between two labels using only the given reported channels."""
+        prof = profile_with_channels(state.profile, channels)
+        if not prof.sensors and not prof.qualitative:
+            return None
+        m = mode or state.data_mode
+        if m not in ctx.kb.available_modes():
+            return None
+        rr = retriever.retrieve(prof, m, top_k=self._top_k, exclude_ids=self._excl, historical_k=40)
+        hist = rr.stats.get("historical_support") or {}
+        a, b = pair
+        sa, sb = float(hist.get(a, 0.0)), float(hist.get(b, 0.0))
+        if sa + sb <= 0:
+            return {"share": None}
+        share = {a: round(sa / (sa + sb), 3), b: round(sb / (sa + sb), 3)}
+        rr.bundle = [c for c in rr.bundle if c.record.label in (a, b)]
+        rnd = state.feedback_rounds + 1 + int(state.council.get("rounds", 0))
+        added = self._ingest(state, rr, round_no=rnd, limit=2)
+        self._merge_stats(state, rr, f"council_precedent:{a} vs {b}", added, rnd, update_historical=False)
+        did = derived_id(state, f"precedent:{a}|{b}:{m}:{','.join(channels)}",
+                         f"Share of nearest {m.upper()} cases labelled '{a}' among '{a}'/'{b}' on channels {', '.join(channels)}",
+                         value=share[a])
+        return {"share": share, "evidence_ids": added, "derived_id": did, "support": hist}
+
+    def _council_label_evidence(self, state: DiagnosticState, retriever: MultiStageRetriever, label: str) -> List[str]:
+        rr = retriever.retrieve(state.profile, state.data_mode, top_k=3, exclude_ids=self._excl, label_filter=[label])
+        rnd = state.feedback_rounds + 1 + int(state.council.get("rounds", 0))
+        added = self._ingest(state, rr, round_no=rnd, limit=2)
+        self._merge_stats(state, rr, f"council_label_evidence:{label}", added, rnd, update_historical=False)
+        return added
 
     # ─────────────────────────────────────────────────────────────────────────
     async def _run_agent(self, key: str, state: DiagnosticState, ctx: AgentContext, audit: AuditRecorder,
@@ -500,6 +653,8 @@ class AgentOrchestrator:
                                  "checks": [c.model_dump() for c in state.claim_checks
                                             if c.status == "UNSUPPORTED"][:40]},
             "timeline": [a.model_dump() for a in state.audit_trail],
+            "messages": [m.model_dump() for m in state.messages],
+            "council": council_summary(state),
             "latency_ms": round(latency_ms, 1),
             "declared_rule_thresholds": RULE_THRESHOLDS,
             "knowledge_base": {st: len(p.records) for st, p in kb.partitions.items()},

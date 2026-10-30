@@ -29,6 +29,16 @@ const SAMPLES = {
     { group: 'data', tag: 'No historical match', q: 'Axial fan unit: temperature 118.0 °C, vibration 0.040, pressure 97.0 PSI, 4800 RPM, current 30.0 A, voltage 470.0 V, flow rate 190.0 L/min. What is wrong?' },
     { group: 'data', tag: 'Qualitative only', q: 'Predict failure from elevated vibration and temperature readings.' },
   ],
+  // Real measured knowledge base (UCI #447 hydraulic test rig). Prompts use values typical of each recorded
+  // condition but are still illustrative inputs; the rig has no RPM, current or voltage sensors.
+  hydraulic: [
+    { group: 'fault', tag: 'Hot oil, low flow', q: 'Hydraulic power unit: temperature 54.2 °C, vibration 0.65, pressure 158 bar, flow rate 6.48 L/min. What is the most likely fault?' },
+    { group: 'fault', tag: 'Accumulator pressure', q: 'Hydraulic power unit: temperature 36.3 °C, vibration 0.565, pressure 160.5 bar, flow rate 6.65 L/min. Pressure recovery after each load step feels sluggish. What is the most likely fault?' },
+    { group: 'fault', tag: 'Pump leakage', q: 'Hydraulic power unit: temperature 36.3 °C, vibration 0.543, pressure 160.4 bar, flow rate 6.42 L/min. Delivered flow is slightly down at constant load. Diagnose.' },
+    { group: 'fault', tag: 'Valve switching', q: 'Hydraulic power unit: temperature 36.25 °C, vibration 0.55, pressure 160.6 bar, flow rate 6.49 L/min. Cycle timing has drifted. What is the most likely fault?' },
+    { group: 'fault', tag: 'Healthy cycle', q: 'Hydraulic power unit: temperature 36.0 °C, vibration 0.551, pressure 161.0 bar, flow rate 6.71 L/min. Is anything wrong?' },
+    { group: 'data', tag: 'Missing temperature', q: 'Hydraulic power unit: temperature reading unavailable, vibration 0.6, pressure 158 bar, flow rate 6.5 L/min. Diagnose.' },
+  ],
   failure_iq: [
     { tag: 'Sensor → events', q: 'Which failure is likely when winding temperature rises in an electric motor?' },
     { tag: 'Sensor → events', q: 'What does abnormal oil debris indicate in a compressor?' },
@@ -66,7 +76,7 @@ export default function ChatPage() {
 
   const modes = health?.data_modes?.[dataset] || []
   const counts = health?.record_counts?.[dataset] || {}
-  const loaded = dataset === 'afrb' ? health?.afrb_loaded : health?.failure_iq_loaded
+  const loaded = Object.values(counts).some((n) => n > 0)
   const effectiveMode = modes.includes(mode) ? mode : modes[0] || 'real'
 
   const submit = async (q = input) => {
@@ -112,6 +122,7 @@ export default function ChatPage() {
           <div className="flex justify-between"><span>Real records</span><b className="text-ink tabular-nums">{(counts.real ?? 0).toLocaleString()}</b></div>
           <div className="flex justify-between"><span>Synthetic records</span><b className="text-ink tabular-nums">{(counts.synthetic ?? 0).toLocaleString()}</b></div>
           {dataset === 'failure_iq' && <div className="text-[10px]">This knowledge base has no synthetic partition.</div>}
+          {dataset === 'hydraulic' && <div className="text-[10px] leading-snug">Measured 60 s load cycles from the UCI #447 hydraulic test rig. No synthetic partition; RPM, current and voltage are not measured on this rig.</div>}
         </div>
       </div>
       <div>
@@ -160,7 +171,7 @@ export default function ChatPage() {
       <div className="flex flex-col h-full min-h-0">
         <header className="min-h-14 shrink-0 border-b border-line bg-white px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
           <div className="flex items-center gap-3 min-w-0">
-            <h1 className="text-[15px] font-semibold truncate">{dataset === 'afrb' ? 'AFRB sensor diagnosis' : 'FailureSensorIQ relevance'}</h1>
+            <h1 className="text-[15px] font-semibold truncate">{({ afrb: 'AFRB sensor diagnosis', failure_iq: 'FailureSensorIQ relevance', hydraulic: 'Hydraulic rig diagnosis (real data)' })[dataset] || dataset}</h1>
             <SourceBadge source={effectiveMode} />
           </div>
           <div className="flex items-center gap-2 text-[12px] min-w-0">

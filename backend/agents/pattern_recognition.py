@@ -115,6 +115,61 @@ class PatternRecognitionAgent(BaseAgent):
                                    "nearest_cases": [e.evidence_id for e in nearest]},
                            pass_number=1 + state.feedback_rounds)
 
+    # ── council: focused precedent check ────────────────────────────────────
+    def _focus_channels(self, state: DiagnosticState, ctx: AgentContext, a: str, b: str) -> List[str]:
+        from harness.analysis import discriminating_sensors
+        reported = set(state.profile.sensors) | set(state.profile.qualitative)
+        disc = [d["sensor"] for d in discriminating_sensors(a, b, ctx.ref, top=3) if d["sensor"] in reported]
+        return disc or sorted(reported)
+
+    def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
+        """Persona: data scientist. Answers only with precedent: what do the nearest historical cases say
+        when compared on exactly the channels in dispute? Concedes only if that precedent favours the other label."""
+        if not tools:
+            return []
+        posted = []
+        for m in state.inbox(self.key, round_no):
+            need = m.payload.get("need")
+            if m.kind == "QUESTION" and need in ("separate", "real_precedent"):
+                a, b = m.payload["pair"]
+                mode = "real" if need == "real_precedent" else None
+            elif m.kind == "CHALLENGE":
+                a, b = m.payload["verified"], m.payload["your_label"]
+                mode = None
+            else:
+                continue
+            chans = self._focus_channels(state, ctx, a, b)
+            res = tools.focused_precedent(state, [a, b], chans, mode=mode)
+            share = res.get("share") if res else None
+            scope = "REAL cases only, " if mode == "real" else ""
+            if share:
+                fav = a if share[a] >= share[b] else b
+                text = (f"Precedent check ({scope}channels {', '.join(sensor_name(c) for c in chans)}): among the nearest "
+                        f"cases labelled {a} or {b}, {share[a]:.0%} are {a} and {share[b]:.0%} are {b} [{res['derived_id']}]"
+                        + (f", e.g. {', '.join(res['evidence_ids'])}" if res.get("evidence_ids") else "") + ".")
+            else:
+                fav = None
+                text = f"Precedent check ({scope}channels {', '.join(sensor_name(c) for c in chans)}): no nearby case is labelled {a} or {b}."
+            ids = ([res["derived_id"]] if res and res.get("derived_id") else []) + (res.get("evidence_ids", []) if res else [])
+            if m.kind == "CHALLENGE":
+                mine, other = b, a
+                if share and share[other] > share[mine]:
+                    posted.append(state.post(round=round_no, sender=self.key, kind="CONCESSION", recipients=[m.sender, "all"],
+                                             topic=m.topic, in_reply_to=m.message_id, evidence_ids=ids,
+                                             text=text + f" The precedent favours {other}; I revise my finding from {mine} to {other}.",
+                                             payload={"new_label": other, "old_label": mine, "precedent_share": share, "pair": [a, b]}))
+                else:
+                    posted.append(state.post(round=round_no, sender=self.key, kind="HOLD", recipients=[m.sender, "all"],
+                                             topic=m.topic, in_reply_to=m.message_id, evidence_ids=ids,
+                                             text=text + f" The precedent does not favour {other}; I keep {mine}.",
+                                             payload={"label": mine, "precedent_share": share, "pair": [a, b]}))
+            else:
+                posted.append(state.post(round=round_no, sender=self.key, kind="EVIDENCE_SHARE", recipients=[m.sender, "all"],
+                                         topic=m.topic, in_reply_to=m.message_id, evidence_ids=ids, text=text,
+                                         payload={"pair": [a, b], ("real_share" if mode else "precedent_share"): share,
+                                                  "channels": chans, "favours": fav}))
+        return posted
+
     def llm_task(self, state, ctx, report, **_):
         return ("Describe the recurring patterns across the EVIDENCE. Return JSON {\"narrative\": str, "
                 "\"supporting_evidence\": [{\"statement\": str, \"evidence_ids\": [..]}]}. "

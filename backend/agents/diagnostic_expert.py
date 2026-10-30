@@ -108,6 +108,76 @@ class DiagnosticExpertAgent(BaseAgent):
             return rescored, notes
         return scored, notes
 
+    # ── council: discriminating-channel test of a contested pair ────────────
+    def pair_signature_test(self, state: DiagnosticState, ctx: AgentContext, a: str, b: str) -> Dict[str, Any]:
+        """Which hypothesis do the channels that best separate a from b favour? (no state mutation)"""
+        disc = discriminating_sensors(a, b, ctx.ref, top=3)
+        prof = state.profile
+        fa = fb = 0.0
+        used, unreported, ids, notes = [], [], [], []
+        for d in disc:
+            s_ = d["sensor"]
+            if s_ not in prof.sensors:
+                unreported.append(s_)
+                continue
+            v = prof.sensors[s_]
+            sa, sb = ctx.ref.signatures[a], ctx.ref.signatures[b]
+            za = abs(v - sa["median"][s_]) / sa["scale"][s_]
+            zb = abs(v - sb["median"][s_]) / sb["scale"][s_]
+            fa += math.exp(-0.5 * za * za)
+            fb += math.exp(-0.5 * zb * zb)
+            ida, idb = signature_median_id(state, a, s_, sa["median"][s_]), signature_median_id(state, b, s_, sb["median"][s_])
+            ids += [ida, idb]
+            used.append(s_)
+            notes.append(f"{sensor_name(s_)} {fmt_sensor(s_, v)} is closer to {a if za < zb else b} "
+                         f"({a} median [{ida}], {b} median [{idb}])")
+        share = {a: round(fa / (fa + fb), 3), b: round(fb / (fa + fb), 3)} if fa + fb > 0 else None
+        return {"share": share, "used": used, "unreported": unreported, "ids": ids, "notes": notes}
+
+    def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
+        """Persona: hypothesis-driven investigator. Answers with a structured elimination test on the
+        channels that separate the contested hypotheses, and asks for evidence when a rival is thin."""
+        posted = []
+        prior = state.analysis.get("conflict_resolution") or {}
+        for m in state.inbox(self.key, round_no):
+            if m.kind == "QUESTION" and m.payload.get("need") == "separate":
+                a, b = m.payload["pair"]
+            elif m.kind == "CHALLENGE":
+                a, b = m.payload["verified"], m.payload["your_label"]
+            else:
+                continue
+            if a not in ctx.ref.signatures or b not in ctx.ref.signatures:
+                continue
+            t = self.pair_signature_test(state, ctx, a, b)
+            already = sorted(prior.get("pair", [])) == sorted([a, b])
+            if t["share"]:
+                fav = a if t["share"][a] >= t["share"][b] else b
+                text = (f"Discriminating-channel test, {a} vs {b}: " + "; ".join(t["notes"]) +
+                        f". Signature evidence favours {fav} ({t['share'][fav]:.0%} of the pairwise fit)."
+                        + (" This was already applied in the feedback loop, so it is not counted twice." if already else ""))
+            else:
+                text = f"None of the channels that separate {a} from {b} were reported, so I cannot separate them."
+            posted.append(state.post(round=round_no, sender=self.key, kind="EVIDENCE_SHARE",
+                                     recipients=[m.sender, "all"], topic=f"{a} vs {b}", in_reply_to=m.message_id,
+                                     text=text, evidence_ids=t["ids"],
+                                     payload={"pair": [a, b], "signature_share": t["share"], "already_applied": already,
+                                              "channels": t["used"]}))
+            if t["unreported"]:
+                names = [sensor_name(x) for x in t["unreported"]]
+                posted.append(state.post(round=round_no, sender=self.key, kind="HUMAN_INPUT_REQUEST",
+                                         recipients=["human_review_coordinator"], topic=f"{a} vs {b}",
+                                         text=f"Measuring {', '.join(names)} would separate {a} from {b}.",
+                                         payload={"channels": t["unreported"], "pair": [a, b]}))
+            n_b = sum(1 for e in state.evidence if e.label == b)
+            if tools and n_b < 2 and not any(x.kind == "EVIDENCE_REQUEST" and x.sender == self.key
+                                             and x.payload.get("label") == b for x in state.messages):
+                added = tools.request_label_evidence(b)
+                posted.append(state.post(round=round_no, sender=self.key, kind="EVIDENCE_REQUEST", recipients=["harness"],
+                                         topic=b, text=(f"Only {n_b} record(s) for {b} in the bundle; requested cases labelled {b}. "
+                                                        + (f"Retrieval added {', '.join(added)}." if added else "No further cases found.")),
+                                         evidence_ids=added, payload={"label": b, "added": added}, resolved=bool(added)))
+        return posted
+
     def llm_task(self, state, ctx, report, **_):
         return ("Review the draft. Return JSON {\"hypotheses\": [{\"label\": str, \"supporting\": [{\"statement\": str, "
                 "\"evidence_ids\": [..]}], \"contradicting\": [...], \"missing\": [str]}], \"narrative\": str}. "

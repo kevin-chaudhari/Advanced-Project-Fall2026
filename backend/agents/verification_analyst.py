@@ -157,6 +157,64 @@ class VerificationAnalystAgent(BaseAgent):
                     "candidate_reviews": [{k: v for k, v in r.items() if k != "hypothesis"} for r in reviews],
                     "irrelevant_records": irrelevant, "first_pass_findings": findings})
 
+    # ── council: challenge, answer contradiction questions ──────────────────
+    def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
+        """Persona: adversarial reviewer. Challenges every first-pass agent whose finding is not the
+        best-supported hypothesis, and answers questions with evidence counts, never with a vote."""
+        rep = state.verification_output
+        if not rep or not rep.extras.get("verified_label"):
+            return []
+        verified = rep.extras["verified_label"]
+        reviews = {r["label"]: r for r in rep.extras.get("candidate_reviews", [])}
+        v = reviews.get(verified, {})
+        slot_to_key = {"diagnostic_expert_output": "diagnostic_expert", "pattern_output": "pattern_agent",
+                       "rapid_triage_output": "aggressive_agent"}
+        posted = []
+        challenged = {m.recipients[0] for m in state.messages if m.kind == "CHALLENGE" and m.sender == self.key
+                      and m.recipients}
+        for slot, key in slot_to_key.items():
+            agent_rep = getattr(state, slot)
+            lab = agent_rep.finding_label if agent_rep else None
+            if not lab or lab == verified or key in challenged:
+                continue
+            x = reviews.get(lab)
+            detail = (f"{lab} scores {x['score']:.2f} with {x['support']} supporting / {x['contradict']} contradicting items"
+                      if x else f"{lab} is not among the evidence-backed candidates")
+            posted.append(state.post(round=round_no, sender=self.key, kind="CHALLENGE", recipients=[key],
+                                     topic=f"{verified} vs {lab}", evidence_ids=rep.evidence_ids[:3],
+                                     text=(f"Your finding {lab} is not the best-supported hypothesis. {verified} scores "
+                                           f"{v.get('score', 0):.2f} with {v.get('support', 0)} supporting / "
+                                           f"{v.get('contradict', 0)} contradicting items; {detail}. Show evidence or reconsider."),
+                                     payload={"verified": verified, "your_label": lab}))
+        for q in state.inbox(self.key, round_no):
+            need = q.payload.get("need")
+            if q.kind != "QUESTION":
+                continue
+            if need == "contradiction_review":
+                alt = rep.extras.get("alternative")
+                a = reviews.get(alt, {}) if alt else {}
+                if alt:
+                    worse = a.get("contradict", 0) >= v.get("contradict", 0)
+                    text = (f"{verified} has {v.get('contradict', 0)} contradicting item(s); the runner-up {alt} has "
+                            f"{a.get('contradict', 0)}. " + ("The contradictions do not favour the runner-up."
+                                                             if worse else "The runner-up fits these channels better."))
+                else:
+                    text = f"{verified} has {v.get('contradict', 0)} contradicting item(s) and no evidence-backed rival."
+                posted.append(state.post(round=round_no, sender=self.key, kind="EVIDENCE_SHARE", recipients=[q.sender],
+                                         topic=q.topic, in_reply_to=q.message_id, text=text,
+                                         evidence_ids=[i for c in state.contradictions for i in c.evidence_ids][:4],
+                                         payload={"contradictions": {verified: v.get("contradict", 0),
+                                                                     **({alt: a.get("contradict", 0)} if alt else {})}}))
+                q.resolved = True
+            elif need == "agreement_check":
+                posted.append(state.post(round=round_no, sender=self.key, kind="EVIDENCE_SHARE", recipients=[q.sender],
+                                         topic=q.topic, in_reply_to=q.message_id,
+                                         text=(f"Agreement is recorded but not counted as proof: the evidence score for "
+                                               f"{verified} is {v.get('score', 0):.2f}."),
+                                         payload={"score": v.get("score", 0)}))
+                q.resolved = False
+        return posted
+
     def llm_task(self, state, ctx, report, **_):
         return ("Act as an adversarial reviewer of the draft verdict. Return JSON {\"narrative\": str, "
                 "\"supporting_evidence\": [{\"statement\": str, \"evidence_ids\": [..]}]}. Point out weaknesses; "
