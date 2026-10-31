@@ -1,59 +1,65 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --bg: #F7F9FC;
-  --surface: #FFFFFF;
-  --primary: #2563EB;
-  --secondary: #06B6D4;
-  --success: #16A34A;
-  --warning: #F59E0B;
-  --danger: #DC2626;
-  --text: #0F172A;
-  --muted: #64748B;
-  --border: #E2E8F0;
-  /* data-viz series (validated: REAL vs SYNTHETIC) */
-  --series-real: #2563EB;
-  --series-synthetic: #0891B2;
-  --series-neutral: #94A3B8;
+  --bg: #F7F4EC;
+  --bg-2: #EFE9DD;
+  --surface: #FFFCF5;
+  --text: #17140F;
+  --muted: #4A453D;
+  --border: #E5DED1;
+  --accent: #A68A64;
+  --olive: #78866B;
+  --warning: #C18D4D;
+  --danger: #B9685D;
+  /* data-viz series (REAL vs SYNTHETIC) */
+  --series-real: #A68A64;
+  --series-synthetic: #6E8582;
+  --series-neutral: #AFA593;
 }
 
 html, body, #root { height: 100%; }
 body {
   margin: 0;
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'tnum' 0;
 }
 
 @layer components {
-  .card { @apply bg-surface border border-line rounded-xl shadow-card; }
+  .card { @apply bg-surface border border-line rounded-xl; }
   .card-pad { @apply p-5; }
-  .section-title { @apply text-[13px] font-semibold text-ink tracking-tight; }
-  .eyebrow { @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-muted; }
+  .section-title { @apply text-[13px] font-semibold text-ink; }
+  /* small sentence-case label (no all-caps tracking) */
+  .eyebrow { @apply text-[11.5px] font-medium text-muted; }
   .chip { @apply inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-semibold border; }
-  .btn { @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500; }
-  .btn-primary { @apply btn bg-primary-600 text-white hover:bg-primary-700; }
-  .btn-ghost { @apply btn text-muted hover:text-ink hover:bg-slate-100; }
-  .input { @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-sm outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-100; }
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas; }
+  .btn-primary { @apply btn bg-primary-700 text-surface hover:bg-ink; }
+  .btn-ghost { @apply btn text-muted hover:text-ink hover:bg-well; }
+  .input { @apply w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-100; }
   .mono { @apply font-mono text-[12px]; }
+  .focus-ring { @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500; }
 }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 8px; }
+::-webkit-scrollbar-thumb { background: #D3CABA; border-radius: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 @keyframes pulseDot { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
 .pulse-dot { animation: pulseDot 1.4s ease-in-out infinite; }
 
+/* Verdict reveal — the single orchestrated moment when a new diagnosis lands */
+@keyframes verdictIn { from { opacity: 0; transform: translateY(4px) } to { opacity: 1; transform: none } }
+.verdict-in { animation: verdictIn .45s ease-out both; }
+@keyframes stampIn { 0% { opacity: 0; transform: scale(1.12) rotate(-3deg) } 100% { opacity: 1; transform: rotate(-3deg) } }
+.stamp-in { animation: stampIn .35s ease-out .25s both; }
+
 /* Decision Explorer: content fade when a panel is maximised */
 @keyframes deFadeUp { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
 .de-fade-up { animation: deFadeUp .32s ease-out .08s both; }
-/* Decision Explorer: maximised-panel dialog backdrop */
 @keyframes deFade { from { opacity: 0 } to { opacity: 1 } }
 .de-fade { animation: deFade .18s ease-out both; }
-@media (prefers-reduced-motion: reduce) { .de-fade-up, .de-fade { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .de-fade-up, .de-fade, .verdict-in, .stamp-in { animation: none; } }

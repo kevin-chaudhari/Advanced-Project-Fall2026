@@ -14,8 +14,8 @@ import { SensorHealthChart, HypothesisComparisonChart } from './DiagnosticCharts
 
 /* Categorical palette in fixed order (validated data-viz palette); assigned to
    agents in the order the backend returns them — never by name. */
-const AGENT_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948']
-const NEUTRAL = '#94A3B8'
+const AGENT_COLORS = ['#A68A64', '#6E8582', '#C18D4D', '#78866B', '#B9685D', '#8C7AA0', '#5A544A', '#B49A4A']
+const NEUTRAL = '#AFA593'
 
 /* Pipeline column per execution_mode reported by the backend for each agent. */
 const COLUMN_FOR_MODE = { parallel: 'initial', review: 'verification', calibration: 'ambiguity', synthesis: 'final' }
@@ -93,10 +93,10 @@ function ConfidenceRing({ value, size = 64 }) {
   const r = (size - 8) / 2
   const c = 2 * Math.PI * r
   const v = Math.max(0, Math.min(1, value))
-  const color = v >= 0.65 ? '#16A34A' : v >= 0.45 ? '#F59E0B' : '#DC2626'
+  const color = v >= 0.65 ? '#78866B' : v >= 0.45 ? '#C18D4D' : '#B9685D'
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={`confidence ${pct(v)}`}>
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#E2E8F0" strokeWidth="6" />
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#E5DED1" strokeWidth="6" />
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth="6" strokeLinecap="round"
         strokeDasharray={`${c * v} ${c}`} transform={`rotate(-90 ${size / 2} ${size / 2})`} style={{ transition: 'stroke-dasharray .6s ease' }} />
       <text x="50%" y="52%" textAnchor="middle" dominantBaseline="middle" className="fill-ink" style={{ fontSize: size * 0.24, fontWeight: 600 }}>
@@ -180,18 +180,18 @@ function Dialog({ title, contentKey, onClose, children }) {
   }, [])
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/40 p-2 sm:p-6 de-fade"
+    <div className="fixed inset-0 z-50 flex bg-canvas de-fade"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={titleId}
-        className="flex w-full max-w-6xl max-h-full flex-col rounded-xl border border-line bg-white shadow-lift">
-        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-5">
+        className="flex h-full w-full flex-col bg-canvas">
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-4 py-3 sm:px-8">
           <div id={titleId} className="min-w-0">{title}</div>
           <button ref={closeRef} type="button" onClick={onClose} className="btn-ghost border border-line px-2.5 py-1.5" aria-label="Minimize panel" title="Minimize (Esc)">
             <Minimize2 size={14} /> <span className="hidden sm:inline">Minimize</span>
           </button>
         </header>
         {/* keyed so switching content (e.g. agent → evidence) starts at the top */}
-        <div key={contentKey} className="overflow-y-auto p-4 sm:p-5 de-fade-up">{children}</div>
+        <div key={contentKey} className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-8 de-fade-up">{children}</div>
       </div>
     </div>,
     document.body,
@@ -495,7 +495,7 @@ function Lane({ lane, spans, total, selected, onSelect, compact }) {
               title={`#${s.step} ${s.stage} · ${s.action}\n${fmtNum(s.duration_ms, 1)} ms · ${s.status}${s.reason ? `\n${s.reason}` : ''}`}
               className={cx('absolute rounded-sm transition-[box-shadow,transform] hover:scale-y-125 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500',
                 compact ? 'top-0 bottom-0' : 'top-0.5 bottom-0.5', isSel && 'ring-2 ring-offset-1 ring-ink')}
-              style={{ left: `${Math.min(left, 99.2)}%`, width: `${width}%`, minWidth: compact ? 5 : 6, background: s.status === 'error' ? '#DC2626' : lane.color, opacity: s.status === 'loop' ? 0.75 : 1,
+              style={{ left: `${Math.min(left, 99.2)}%`, width: `${width}%`, minWidth: compact ? 5 : 6, background: s.status === 'error' ? '#B9685D' : lane.color, opacity: s.status === 'loop' ? 0.75 : 1,
                 backgroundImage: s.status === 'loop' ? 'repeating-linear-gradient(135deg, rgba(255,255,255,.55) 0 2px, transparent 2px 5px)' : undefined }}
               aria-label={`Step ${s.step}: ${s.stage} ${s.action}`} />
           )
@@ -870,3 +870,6 @@ export default function DecisionExplorer({ result, question }) {
     </div>
   )
 }
+
+/* shared with the Agent dashboard so both views draw the same timeline */
+export { buildModel, Timeline, SelectedStep, TimelinePanel }

@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid, LineChart, Line } from 'recharts'
-import AppShell from '../components/AppShell'
 import { Card, StatTile, SourceBadge, Empty, pct, fmtNum, cx } from '../components/ui'
 import { getDatasetSummary, getEvaluation, getAnalyses } from '../services/api'
 
-const C_REAL = '#2563EB'
-const C_SYN = '#0891B2'
-const C_BASE = '#94A3B8'
-const axis = { fontSize: 11, fill: '#64748B' }
-const grid = <CartesianGrid stroke="#EEF2F7" vertical={false} />
+const C_REAL = '#A68A64'
+const C_SYN = '#6E8582'
+const C_BASE = '#AFA593'
+const axis = { fontSize: 11, fill: '#777064' }
+const grid = <CartesianGrid stroke="#EFE9DD" vertical={false} />
 
 function TooltipBox({ active, payload, label, fmt = (v) => v }) {
   if (!active || !payload?.length) return null
@@ -78,7 +77,7 @@ export default function AnalysisDashboard() {
   ].map(([k, name]) => ({ name, Baseline: evalRes.baseline.summary[k], 'Harness (combined)': evalRes.harness_combined?.summary?.[k], 'Harness (real only)': evalRes.harness_real?.summary?.[k] })) : []
 
   return (
-    <AppShell>
+    <div className="h-full overflow-y-auto">
       <header className="h-14 border-b border-line bg-white px-6 flex items-center"><h1 className="text-[15px] font-semibold">Data & evaluation</h1></header>
       <div className="max-w-7xl mx-auto px-6 py-6 space-y-6">
         {err && <div className="card p-4 text-sm text-danger-700">{err}</div>}
@@ -116,10 +115,10 @@ export default function AnalysisDashboard() {
             {!labelRows.length ? <Empty>Loading…</Empty> : (
               <ResponsiveContainer width="100%" height={Math.max(260, labelRows.length * 30)}>
                 <BarChart data={labelRows} layout="vertical" margin={{ left: 40, right: 16 }} barGap={2}>
-                  <CartesianGrid stroke="#EEF2F7" horizontal={false} />
+                  <CartesianGrid stroke="#EFE9DD" horizontal={false} />
                   <XAxis type="number" tick={axis} axisLine={false} tickLine={false} />
                   <YAxis type="category" dataKey="label" tick={axis} width={150} axisLine={false} tickLine={false} />
-                  <Tooltip content={<TooltipBox fmt={(v) => v.toLocaleString()} />} cursor={{ fill: '#F1F5F9' }} />
+                  <Tooltip content={<TooltipBox fmt={(v) => v.toLocaleString()} />} cursor={{ fill: '#EFE9DD' }} />
                   <Legend wrapperStyle={{ fontSize: 12 }} />
                   <Bar dataKey="REAL" fill={C_REAL} radius={[0, 4, 4, 0]} barSize={9} />
                   <Bar dataKey="SYNTHETIC" fill={C_SYN} radius={[0, 4, 4, 0]} barSize={9} />
@@ -211,7 +210,7 @@ export default function AnalysisDashboard() {
                     {grid}
                     <XAxis dataKey="name" tick={axis} axisLine={false} tickLine={false} interval={0} />
                     <YAxis tick={axis} tickFormatter={(v) => `${Math.round(v * 100)}%`} domain={[0, 1]} axisLine={false} tickLine={false} />
-                    <Tooltip content={<TooltipBox fmt={(v) => pct(v, 1)} />} cursor={{ fill: '#F1F5F9' }} />
+                    <Tooltip content={<TooltipBox fmt={(v) => pct(v, 1)} />} cursor={{ fill: '#EFE9DD' }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
                     <Bar dataKey="Baseline" fill={C_BASE} radius={[4, 4, 0, 0]} barSize={14} />
                     <Bar dataKey="Harness (real only)" fill={C_REAL} radius={[4, 4, 0, 0]} barSize={14} />
@@ -247,6 +246,6 @@ export default function AnalysisDashboard() {
           )}
         </Card>
       </div>
-    </AppShell>
+    </div>
   )
 }
