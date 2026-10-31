@@ -23,6 +23,8 @@ from models.schemas import HealthResponse, LoadDataResponse, QueryRequest, Query
 from services.dataset_summary import evaluation_results, summarise_kb  # noqa: E402
 from services.runtime import INDEX_NAMES, Runtime, build_runtime  # noqa: E402
 from utils.db import get_agent_aggregates, get_analyses, init_db, save_analysis  # noqa: E402
+from harness.agent_trace.trace_repository import init_trace_tables, link_analysis  # noqa: E402
+from services.trace_api import router as trace_router  # noqa: E402
 from utils.llm_client import llm_client  # noqa: E402
 from utils.logger import setup_logger  # noqa: E402
 
@@ -40,6 +42,11 @@ async def lifespan(app: FastAPI):
         init_db()
     except Exception as exc:
         logger.warning("[WARN] Could not initialise analysis DB: %s", exc)
+    try:
+        init_trace_tables()
+        logger.info("[OK] AgentTrace tables ready.")
+    except Exception as exc:
+        logger.warning("[WARN] Could not initialise AgentTrace tables: %s", exc)
     runtime = build_runtime()
     for name, kb in runtime.kbs.items():
         logger.info("[OK] %s knowledge base: %s", name, {k: len(p.records) for k, p in kb.partitions.items()})
@@ -55,6 +62,7 @@ app = FastAPI(title="Industrial Diagnostic AI System",
 origins = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
+app.include_router(trace_router)
 
 
 def _loaded(name: str) -> bool:
@@ -66,10 +74,13 @@ def _bg_save_analysis(question: str, dataset: str, result: dict) -> None:
         report = result.get("analysis_report", {})
         if not report:
             return
-        save_analysis(question=question, dataset=dataset, analysis_report=report,
-                      final_diagnosis=result.get("final_diagnosis", ""),
-                      confidence=float(result.get("confidence", 0.0)),
-                      latency_ms=float(result.get("harness", {}).get("latency_ms", 0.0)))
+        row_id = save_analysis(question=question, dataset=dataset, analysis_report=report,
+                               final_diagnosis=result.get("final_diagnosis", ""),
+                               confidence=float(result.get("confidence", 0.0)),
+                               latency_ms=float(result.get("harness", {}).get("latency_ms", 0.0)))
+        trace_id = result.get("harness", {}).get("trace_id")
+        if row_id and trace_id:
+            link_analysis(trace_id, row_id)      # GET /analyses/{analysis_id}/trace
     except Exception as exc:
         logger.error("[BG] Failed to save analysis: %s", exc, exc_info=True)
 

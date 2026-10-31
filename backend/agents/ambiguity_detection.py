@@ -41,6 +41,13 @@ class AmbiguityDetectionAgent(BaseAgent):
         scored = state.analysis.get("hypotheses", [])
         top = scored[0]["score"] if scored else 0.0
         second = scored[1]["score"] if len(scored) > 1 else 0.0
+        if state.collab.get("score_delta"):        # evidence confidence uses evidence scores; the council enters via the blend
+            from harness.collaboration import evidence_scores
+            ev = evidence_scores(state)
+            lead = ver.finding_label if ver and ver.finding_label in ev else (scored[0]["label"] if scored else None)
+            if lead:
+                top = ev[lead]
+                second = max([v for l, v in ev.items() if l != lead] or [0.0])
         label = ver.finding_label if ver else (scored[0]["label"] if scored else None)
         extras = ver.extras if ver else {}
 
@@ -61,6 +68,7 @@ class AmbiguityDetectionAgent(BaseAgent):
             typical_distance=stats.get("typical_nn_distance"), no_match_distance=stats.get("no_match_threshold"),
             historical_vote=hist.get(label) if hist and label else None, synthetic_share=synth_share,
             data_mode=state.data_mode)
+        self._blend_council(state, breakdown)
         state.confidence = breakdown
 
         flags: List[EvidenceStatement] = []
@@ -107,6 +115,52 @@ class AmbiguityDetectionAgent(BaseAgent):
                                    "missing_key_sensors": missing_key, "consistency_violations": violations,
                                    "synthetic_share": round(synth_share, 3)})
 
+    # ── collaborative council: blend the agents' confidence, capped by the evidence ──
+    @staticmethod
+    def _blend_council(state: DiagnosticState, breakdown) -> None:
+        """final = min(evidence, (1−β)·evidence + β·council). The council can lower confidence when the
+        agents remain split or unsure; it can never lift it above what the evidence factors support."""
+        from harness.collaboration import collab_enabled, conf_weight
+        from harness.schema import ConfidenceFactor
+        c = state.collab.get("council_confidence")
+        e = breakdown.confidence
+        breakdown.evidence_confidence = e
+        if c is None or not collab_enabled():
+            return
+        b = conf_weight()
+        final = round(min(e, (1 - b) * e + b * c), 3)
+        breakdown.council_confidence = c
+        breakdown.factors.append(ConfidenceFactor(
+            name="council_agreement", value=round(c, 3), weight=b,
+            explanation=(f"agents' agreed confidence in {state.collab.get('joint_label')} after "
+                         f"{state.collab.get('rounds', 0)} collaboration round(s)"
+                         + (f"; dissent: {', '.join(state.collab.get('dissent') or [])}" if state.collab.get('dissent') else "")
+                         + f"; blended with the evidence confidence {e:.2f} and capped by it")))
+        breakdown.formula += (f"  then  final = min(evidence, (1−{b:g})·evidence + {b:g}·council)  "
+                              "(the council can lower, never raise, the evidence confidence)")
+        breakdown.confidence = final
+
+    # ── uncertainty flags to the coordinator ────────────────────────────────
+    def exchange_flags(self, state: DiagnosticState, ctx: AgentContext, round_no: int):
+        """Post each measured uncertainty source once (re-runs only add new ones). The flag text and IDs are
+        the statements this agent already produced; nothing is re-measured here."""
+        rep = state.ambiguity_output
+        if not rep:
+            return []
+        done = {m.payload.get("flag") for m in state.messages if m.sender == self.key and m.kind == "UNCERTAINTY_FLAG"}
+        posted = []
+        for st in rep.supporting_evidence:
+            kind = st.statement.split(":")[0].strip()
+            if not kind or kind in done:
+                continue
+            done.add(kind)
+            posted.append(state.post(round=round_no, sender=self.key, kind="UNCERTAINTY_FLAG",
+                                     recipients=["human_review_coordinator", "verification"], topic=kind,
+                                     text=st.statement, evidence_ids=st.evidence_ids,
+                                     payload={"flag": kind, "ambiguity_level": rep.extras.get("ambiguity_level"),
+                                              "confidence": rep.confidence}))
+        return posted
+
     # ── council: open the agenda ──────────────────────────────────────────
     def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
         """Turn each measured uncertainty source into a question for the agent that owns it.
@@ -121,7 +175,8 @@ class AmbiguityDetectionAgent(BaseAgent):
         kinds = {f.split(":")[0] for f in rep.extras.get("flags", [])}
         pair = contested_pair(state)
         posted = []
-        asked = {(m.payload.get("need"), tuple(m.payload.get("pair") or ())) for m in state.messages if m.sender == self.key}
+        asked = {(m.payload.get("need"), tuple(m.payload.get("pair") or ())) for m in state.messages
+                 if m.sender == self.key and m.phase == "council"}      # collaboration questions do not count here
 
         def new_q(need, p=None):
             return (need, tuple(p or ())) not in asked
@@ -161,13 +216,14 @@ class AmbiguityDetectionAgent(BaseAgent):
                                      topic="agreement", text="The agents agree but the evidence score is low. Is the agreement backed by evidence?",
                                      payload={"need": "agreement_check"}))
         missing = rep.extras.get("missing_key_sensors", [])
-        if missing and round_no == 1:
+        first = state.council.get("first_round", 1)
+        if missing and round_no == first:
             posted.append(state.post(round=round_no, sender=self.key, kind="HUMAN_INPUT_REQUEST",
                                      recipients=["human_review_coordinator"], topic="missing channels",
                                      text="No agent can recover unmeasured channels: " + ", ".join(missing)
                                           + " must be measured on the asset.",
                                      payload={"channels": missing}))
-        if "INSUFFICIENT_EVIDENCE" in kinds and round_no == 1:
+        if "INSUFFICIENT_EVIDENCE" in kinds and round_no == first:
             posted.append(state.post(round=round_no, sender=self.key, kind="HUMAN_INPUT_REQUEST",
                                      recipients=["human_review_coordinator"], topic="readings",
                                      text="The question carries too few numeric readings for the agents to settle this.",

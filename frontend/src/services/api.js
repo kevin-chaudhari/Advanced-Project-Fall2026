@@ -26,4 +26,17 @@ export const getAnalyses = async (limit = 50, dataset = null) =>
 export const getAgentReport = async (limit = 200, dataset = null) =>
   (await api.get('/analyses/agent-report', { params: dataset ? { limit, dataset } : { limit } })).data
 
+/* AgentTrace — every view below reads persisted trace rows from the backend (never sample data). */
+export const listTraces = async ({ limit = 50, offset = 0, dataset = null, status = null } = {}) =>
+  (await api.get('/traces', { params: { limit, offset, ...(dataset ? { dataset } : {}), ...(status ? { status } : {}) } })).data
+export const getTrace = async (id) => (await api.get(`/traces/${id}`)).data
+export const getTraceMessages = async (id) => (await api.get(`/traces/${id}/messages`)).data
+export const getTraceTimeline = async (id) => (await api.get(`/traces/${id}/timeline`)).data
+export const getTraceEvidence = async (id) => (await api.get(`/traces/${id}/evidence`)).data
+export const getTraceHypotheses = async (id) => (await api.get(`/traces/${id}/hypotheses`)).data
+export const getTraceAgents = async (id, includePrompts = false) =>
+  (await api.get(`/traces/${id}/agents`, { params: { include_prompts: includePrompts } })).data
+export const getTraceEvents = async (id, { limit = 500, offset = 0, eventType = null } = {}) =>
+  (await api.get(`/traces/${id}/events`, { params: { limit, offset, ...(eventType ? { event_type: eventType } : {}) } })).data
+
 export default api

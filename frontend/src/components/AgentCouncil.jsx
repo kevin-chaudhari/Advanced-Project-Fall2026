@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { MessagesSquare, ArrowRight, CheckCircle2, CircleDot, UserRound, ChevronDown } from 'lucide-react'
 import { cx, Cited } from './ui'
 
@@ -61,7 +62,9 @@ export default function AgentCouncil({ harness, agents, onEvidence, uid }) {
       <div className="flex items-center gap-2 rounded-xl border border-dashed border-line bg-white px-3 py-2 text-[11.5px] text-muted">
         <MessagesSquare size={14} className="text-slate-400 shrink-0" aria-hidden />
         <span><b className="font-medium text-ink">Agent council not convened.</b>{' '}
-          {c.reasons?.length ? c.reasons.join('; ') : 'Confidence, margin and first-pass agreement were already sufficient.'}</span>
+          {c.reasons?.length ? c.reasons.join('; ') : 'Confidence, margin and first-pass agreement were already sufficient.'}
+          {harness?.collaboration?.messages > 0 && <> The agents still worked it out together: {harness.collaboration.messages} messages over {harness.collaboration.rounds} round(s), joint finding {harness.collaboration.joint_label}{harness.collaboration.council_confidence != null ? ` (council confidence ${harness.collaboration.council_confidence.toFixed(2)})` : ''}.</>}</span>
+        {harness?.trace_id && <Link to={`/traces/${harness.trace_id}`} className="ml-auto shrink-0 font-medium text-primary-700 underline underline-offset-2">Inspect trace</Link>}
       </div>
     )
   }
@@ -87,6 +90,7 @@ export default function AgentCouncil({ harness, agents, onEvidence, uid }) {
           <span>Confidence <Delta before={c.confidence_before} after={c.confidence_after} /></span>
           <span><b className="text-ink tabular-nums">{settled}/{asks.length}</b> settled</span>
           <span><b className="text-ink tabular-nums">{moved.length}</b> position change(s)</span>
+          {harness?.trace_id && <Link to={`/traces/${harness.trace_id}`} className="font-medium text-primary-700 underline underline-offset-2">Inspect trace</Link>}
         </div>
         <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-controls={bodyId}
           className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted hover:bg-slate-100 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"

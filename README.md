@@ -30,6 +30,17 @@ Query → query preparation → multi-stage RAG (semantic · metadata · numeric
   method. Confidence is recomputed with the same factor formula and can only move on evidence: a pair is
   re-weighted only when two independent checks (signature and focused precedent) agree, at 25 % strength.
   Settings: `COUNCIL_MODE=auto|always|off`, `COUNCIL_MAX_ROUNDS` (2). Code: `harness/council.py`.
+* **Collaborative agent council** (`harness/collaboration.py`): after a one-step private draft, all six agents
+  build the diagnosis together — they share positions over every candidate hypothesis, question and challenge
+  each other, revise by reading the board (log-linear pooling with a persona-specific openness) and reach a
+  joint finding. The joint ranking shapes the hypothesis scores; the agents' agreed confidence is blended with
+  the evidence confidence and capped by it. With an LLM configured, `COUNCIL_LLM_MODEL` (default `gpt-4.1`)
+  voices each message in the agent's persona, claim-validated. Accuracy on the 246-scenario benchmark is equal
+  or better in all modes and wrong auto-resolutions drop (2→0 combined, 13→9 real).
+* **AgentTrace observability** (`harness/agent_trace/`): every run gets a `trace_id` and is persisted to SQLite
+  (append-only events with sequence numbers, messages and observed deliveries, agent executions with rendered
+  model input, evidence provenance from retrieval to verification, hypothesis evolution). Browse it in the
+  **Trace explorer** page or via `GET /traces/*`. Full description: **[docs/AGENT_TRACE.md](docs/AGENT_TRACE.md)**.
 
 ## Data
 
@@ -76,6 +87,7 @@ npm run dev                   # http://localhost:5173
 | `GET /evaluation/results` | before/after benchmark summaries |
 | `POST /load-data`, `POST /rebuild-index`, `GET /index-status` | data management (an uploaded AFRB CSV becomes a new REAL partition; the original index is never overwritten) |
 | `GET /analyses`, `GET /analyses/agent-report` | stored analyses |
+| `GET /traces`, `GET /traces/{id}` (+ `/summary`, `/events`, `/messages`, `/agents`, `/timeline`, `/graph`, `/evidence`, `/hypotheses`), `GET /analyses/{id}/trace` | persisted AgentTrace of each run (see [docs/AGENT_TRACE.md](docs/AGENT_TRACE.md)) |
 
 ## Tests and evaluation
 

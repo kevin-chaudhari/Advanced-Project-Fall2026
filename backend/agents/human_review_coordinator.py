@@ -46,6 +46,11 @@ class HumanReviewCoordinatorAgent(BaseAgent):
         margin = float(ver.extras.get("margin", 0.0)) if ver else 0.0
         conf = state.confidence.confidence if state.confidence else 0.0
         top_score = scored[0]["score"] if scored else 0.0
+        if state.collab.get("score_delta"):        # evidence thresholds read the evidence, not the council's ranking
+            from harness.collaboration import evidence_scores
+            ev = evidence_scores(state)
+            top_score = ev.get(label, top_score) if label else top_score
+            margin = round(ev.get(label, 0.0) - max([v for l, v in ev.items() if l != label] or [0.0]), 4) if label else margin
         has_sensor = bool(prof and prof.sensors)
         numeric_kb = ctx.kb.has_numeric()
         violations = (amb.extras.get("consistency_violations") if amb else []) or []
@@ -157,7 +162,8 @@ class HumanReviewCoordinatorAgent(BaseAgent):
         if state.council.get("convened"):
             c = state.council
             moved = ", ".join(f"{p['agent_name']} {p['from']} → {p['to']}" for p in c.get("position_changes", [])) or "none"
-            steps.append(f"Agent council — {len(state.messages)} messages over {c.get('rounds', 0)} round(s); "
+            n_council = sum(1 for m in state.messages if m.phase == "council")   # collaboration reported separately
+            steps.append(f"Agent council — {n_council} messages over {c.get('rounds', 0)} round(s); "
                          f"confidence {c.get('confidence_before_id', '')} → {c.get('confidence_after_id', '')}; "
                          f"position changes: {moved}.")
         if state.verification_output:
@@ -170,7 +176,7 @@ class HumanReviewCoordinatorAgent(BaseAgent):
     def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
         """Persona: plant operations director. Closes the council: what was settled, what changed,
         and which items only a person on site can resolve. She does not change the gate criteria."""
-        msgs = state.messages
+        msgs = [m for m in state.read_board(self.key) if m.phase == "council"]   # escalation council only
         asks = [m for m in msgs if m.kind in ("QUESTION", "CHALLENGE", "EVIDENCE_REQUEST")]
         settled = sum(1 for m in asks if m.resolved)
         channels: List[str] = []
@@ -193,6 +199,40 @@ class HumanReviewCoordinatorAgent(BaseAgent):
         return [state.post(round=round_no, sender=self.key, kind="SYNTHESIS", recipients=["all"], topic="council outcome",
                            text=text, evidence_ids=[i for i in (c.get("confidence_before_id"), c.get("confidence_after_id")) if i],
                            payload={"human_inputs": channels, "settled": settled, "asked": len(asks)})]
+
+    # ── exchange stage: closing synthesis ───────────────────────────────────
+    def final_synthesis(self, state: DiagnosticState, ctx: AgentContext, round_no: int):
+        """Persona: plant operations director. Reads everything addressed to her and states what the final
+        decision rests on. The label comes from verified evidence and the gate from its explicit criteria;
+        the synthesis reports the discussion, it does not vote on it."""
+        rep = state.coordinator_output
+        if not rep:
+            return []
+        inbox = state.inbox_all(self.key)
+        board = state.messages
+        ch = [m for m in board if m.kind in ("CHALLENGE", "COUNTER_ARGUMENT")]
+        vr = [m for m in board if m.kind == "VERIFICATION_RESULT"]
+        unsupported = sum(1 for m in vr for r in m.payload.get("results", []) if r.get("status") == "UNSUPPORTED")
+        flags = [m for m in inbox if m.kind == "UNCERTAINTY_FLAG"]
+        risks = [m for m in inbox if m.kind == "RISK_FLAG"]
+        open_ids = [m.message_id for m in ch if m.resolved is False]
+        decision = state.review.decision if state.review else "n/a"
+        conf = state.confidence.confidence if state.confidence else 0.0
+        senders = sorted({m.sender for m in board})
+        text = (f"Final diagnosis: {state.final_label or rep.finding_label} (confidence {conf:.2f}); review gate: {decision}. "
+                f"Discussion on record: {len(board)} message(s) from {len(senders)} agent(s), "
+                f"{sum(1 for m in board if m.kind == 'FINDING')} finding(s), {len(ch)} challenge(s) "
+                f"({sum(1 for m in ch if m.resolved)} resolved, {len(open_ids)} open), {len(vr)} verification result(s)"
+                + (f" flagging {unsupported} unsupported claim(s)" if unsupported else "")
+                + (f", {len(flags)} uncertainty flag(s)" if flags else "")
+                + (f", {len(risks)} risk flag(s)" if risks else "")
+                + ". Agreement between agents was not counted as evidence: the label follows the verified evidence "
+                  "scores and the decision follows the gate's explicit criteria.")
+        return [state.post(round=round_no, sender=self.key, kind="SYNTHESIS", recipients=["all"], topic="final decision",
+                           text=text, evidence_ids=rep.evidence_ids[:6],
+                           payload={"final_label": state.final_label, "decision": decision, "confidence": conf,
+                                    "considered_messages": [m.message_id for m in inbox],
+                                    "open_disagreements": open_ids, "stage": "final"})]
 
     def llm_task(self, state, ctx, report, **_):
         return ("Rewrite the direct answer for a plant operator in <= 2 sentences, keeping the verified label, "

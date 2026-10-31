@@ -36,3 +36,7 @@ def small_kb(tmp_path_factory):
 def orchestrator():
     from agents.orchestrator import AgentOrchestrator
     return AgentOrchestrator()
+
+
+# AgentTrace writes to its own throw-away SQLite file during tests (never the real analysis_store.db).
+os.environ.setdefault("AGENT_TRACE_DB_PATH", str(Path(__import__("tempfile").mkdtemp(prefix="agenttrace-")) / "traces.db"))

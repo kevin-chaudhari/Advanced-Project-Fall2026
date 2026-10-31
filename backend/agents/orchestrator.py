@@ -24,6 +24,14 @@ Agent orchestrator — the diagnostic *harness* around the six existing agents.
 
 No new LLM agents were added: evidence checking, targeted retrieval, claim
 validation, confidence and the review gate are deterministic harness modules.
+
+Agent-to-agent communication: after a one-step private draft the six agents
+work as a collaborative council (harness/collaboration.py): they share positions
+over every candidate, challenge and answer each other, revise by reading the
+board and reach a joint finding that shapes the diagnosis; Verification then
+checks claims message-by-message, and the escalation council
+(harness/council.py) still convenes on hard cases.  Every run is recorded as an AgentTrace
+(harness/agent_trace/, persisted to SQLite; see docs/AGENT_TRACE.md).
 """
 
 from __future__ import annotations
@@ -49,6 +57,11 @@ from harness.council import (COUNCIL_MAX_ROUNDS, FIRST_PASS, REPORT_SLOT, Counci
 from harness.council import summary as council_summary
 import harness.council as _council_mod
 from harness.statements import derived_id
+from harness.agent_trace import EventType, HypothesisStatus, start_trace
+from harness.agent_trace.trace_manager import current_execution
+from harness.collaboration import Collaboration, close_disputes, collab_enabled, reapply_position
+from harness.collaboration import summary as collab_summary
+import harness.collaboration as _collab_mod
 from harness.canonical import SENSOR_SPECS, fmt_sensor
 from harness.claims import ClaimValidator
 from harness.knowledge_base import KnowledgeBase
@@ -141,13 +154,37 @@ class AgentOrchestrator:
         t_start = time.perf_counter()
         state = DiagnosticState(run_id=uuid.uuid4().hex[:12], query=question, dataset_type=dataset_type,
                                 data_mode=data_mode)
+        state._run_opts = {"excl": list(exclude_record_ids), "top_k": top_k}
+        llm_on = llm_client.is_available()
+        rec = start_trace(
+            run_id=state.run_id, query=question, dataset_type=dataset_type, data_mode=data_mode,
+            llm_mode="llm+deterministic" if llm_on else "deterministic",
+            llm_provider=llm_client.provider if llm_on else None,
+            llm_model=(llm_client.openai_model if llm_client.provider == "openai" else llm_client.ollama_model) if llm_on else None,
+            config={"top_k": top_k, "max_feedback_rounds": MAX_FEEDBACK_ROUNDS, "council_mode": _council_mod.COUNCIL_MODE,
+                    "council_max_rounds": COUNCIL_MAX_ROUNDS, "collaboration": collab_enabled(),
+                    "collab_max_rounds": _collab_mod.max_rounds(), "collab_score_weight": _collab_mod.score_weight(),
+                    "collab_conf_weight": _collab_mod.conf_weight(),
+                    "council_llm_model": (os.getenv("COUNCIL_LLM_MODEL") or ("gpt-4.1" if llm_client.provider == "openai" else llm_client.ollama_model)) if llm_on else None,
+                    "excluded_records": len(exclude_record_ids)})
+        rec.attach(state)
+        try:
+            result = await self._pipeline(state, rec, question, dataset_type, data_mode, kb, embedder, store,
+                                          top_k, t_start)
+        except Exception as exc:
+            rec.fail(state, exc)          # everything recorded so far is already persisted
+            raise
+        rec.complete(state, result)
+        return result
+
+    async def _pipeline(self, state: DiagnosticState, rec, question: str, dataset_type: str, data_mode: str,
+                        kb: KnowledgeBase, embedder, store, top_k: int, t_start: float) -> Dict[str, Any]:
         audit = AuditRecorder(state)
         retriever = self._retrievers.setdefault(id(kb), MultiStageRetriever(kb, embedder, store))
         ref = kb.reference(data_mode)
-        self._excl = list(exclude_record_ids)
-        self._top_k = top_k
 
         # 1 ── query preparation
+        rec.set_stage("query_prep")
         with audit.step("query_prep", "prepare_query") as ev:
             state.profile = prepare_query(question)
             p = state.profile
@@ -155,11 +192,18 @@ class AgentOrchestrator:
                          f"{len(p.qualitative)} directional cue(s), equipment={p.equipment_type or 'unknown'}")
             if p.notes:
                 ev.reason += " | " + "; ".join(p.notes)
+        rec.event(EventType.QUERY_PREPARED, actor="harness",
+                  payload={"sensors": p.sensors, "missing_sensors": p.missing_sensors, "qualitative": p.qualitative,
+                           "equipment_type": p.equipment_type, "intent": p.intent, "notes": p.notes})
 
         # 2 ── initial multi-stage RAG
+        rec.set_stage("initial_rag")
+        rec.event(EventType.RETRIEVAL_STARTED, actor="harness",
+                  payload={"action": "initial", "round": 0, "top_k": top_k, "data_mode": data_mode.upper(),
+                           "stages": ["semantic", "metadata", "numeric", "historical", "rerank"]})
         with audit.step("initial_rag", "multi_stage_retrieval") as ev:
-            rr = retriever.retrieve(state.profile, data_mode, top_k=top_k, exclude_ids=self._excl)
-            self._ingest(state, rr, round_no=0, replace=True)
+            rr = retriever.retrieve(state.profile, data_mode, top_k=top_k, exclude_ids=state._run_opts['excl'])
+            self._ingest(state, rr, round_no=0, replace=True, action="initial")
             ev.retrieval_count = len(state.evidence)
             ev.evidence_used = [e.evidence_id for e in state.evidence]
             ev.reason = (f"scheme={rr.stats['scheme']}; {rr.stats['candidates_total']} candidates → "
@@ -173,16 +217,42 @@ class AgentOrchestrator:
             self._analyse(state, ctx)
             hs = state.analysis.get("hypotheses", [])[:3]
             ev.reason = ", ".join(f"{h['label']} {h['score']:.2f}" for h in hs) or "no hypotheses"
+        rec.event(EventType.HYPOTHESES_SCORED, actor="harness",
+                  payload={"source": "numerical_analysis", "hypotheses": state.analysis.get("hypotheses", [])[:5]})
 
-        # 3 ── three independent perspectives (parallel)
+        # 3 ── stage 1: three independent perspectives (parallel, no messages yet)
+        rec.set_stage("phase1")
         await asyncio.gather(
             self._run_agent("diagnostic_expert", state, ctx, audit, stage="phase1"),
             self._run_agent("pattern_agent", state, ctx, audit, stage="phase1"),
             self._run_agent("aggressive_agent", state, ctx, audit, stage="phase1"),
         )
 
-        # 4 ── verification
+        # 3b ── stage 2: collaborative council — the agents build the finding together
+        collab = collab_enabled()
+        if collab:
+            rec.set_stage("collaboration")
+            n0 = len(state.messages)
+            c = await Collaboration(self.agents, state, ctx, rec).run("collaboration")
+            audit.note("collaboration", "collaborative_council", status="ok",
+                       reason=(f"{len(state.messages) - n0} message(s) over {c.get('rounds', 0)} round(s); joint "
+                               f"{c.get('joint_label')} (council confidence {c.get('council_confidence')}); changes: "
+                               + (", ".join(f"{x['agent_name']} {x['from']}→{x['to']}" for x in c.get('position_changes', [])) or "none"))[:240])
+
+        # 4 ── stage 3: verification checks the joint ranking, then answers claim-check requests
+        rec.set_stage("verification")
         await self._run_agent("verification", state, ctx, audit, stage="verification")
+        if collab:
+            state.set_phase("verification")
+            rv = state.next_round()
+            for key in FIRST_PASS:
+                self._xstep(state, rec, key, "request_verification", lambda a: a.request_verification(state, rv), rv)
+            self._xstep(state, rec, "verification", "verify_claims", lambda a: a.exchange_verify(state, ctx, rv), rv)
+            for key in FIRST_PASS:
+                self._xstep(state, rec, key, "acknowledge_verification",
+                            lambda a: a.acknowledge_verification(state, ctx, rv), rv)
+            rec.event(EventType.VERIFICATION_EXCHANGE_COMPLETED, actor="verification",
+                      payload={"round": rv, "results": sum(1 for m in state.messages if m.kind == "VERIFICATION_RESULT")})
 
         # 5 ── controlled feedback loop
         handled: set = set()
@@ -196,6 +266,11 @@ class AgentOrchestrator:
             if not actionable or state.feedback_rounds >= MAX_FEEDBACK_ROUNDS:
                 break
             state.feedback_rounds += 1
+            rec.set_stage("feedback")
+            rec.event(EventType.FEEDBACK_LOOP_TRIGGERED, actor="harness",
+                      payload={"feedback_round": state.feedback_rounds,
+                               "deficiencies": [{"code": d.code, "detail": d.detail, "action": d.action, "rerun": d.rerun}
+                                                for d in actionable]})
             rerun: List[str] = []
             conflict: Optional[Dict] = None
             for d in actionable:
@@ -212,26 +287,59 @@ class AgentOrchestrator:
             for key in rerun:
                 kwargs = {"conflict": conflict} if key == "diagnostic_expert" and conflict else {}
                 await self._run_agent(key, state, ctx, audit, stage="targeted_rerun", status="loop", **kwargs)
+            if collab and rerun:    # new evidence → the council re-syncs before Verification looks again
+                rec.set_stage("resync")
+                await Collaboration(self.agents, state, ctx, rec).run("resync", rounds=2, opening=False)
             await self._run_agent("verification", state, ctx, audit, stage="verification", status="loop")
 
         # 6 ── ambiguity (provisional when a council follows)
+        rec.set_stage("ambiguity")
         await self._run_agent("ambiguity", state, ctx, audit, stage="ambiguity")
+        if collab:
+            state.set_phase("uncertainty")
+            ru = state.next_round()
+            self._xstep(state, rec, "ambiguity", "uncertainty_flags", lambda a: a.exchange_flags(state, ctx, ru), ru)
 
         # 7 ── agent council: agents talk to each other when the case is hard
         convene, why = should_convene(state, ctx.kb.has_numeric())
         if convene:
+            rec.set_stage("council")
+            rec.event(EventType.COUNCIL_CONVENED, actor="harness", payload={"reasons": why})
             await self._run_council(state, ctx, audit, retriever, why)
         else:
             state.council["reasons"] = why
+            rec.event(EventType.COUNCIL_SKIPPED, actor="harness", payload={"reasons": why})
 
-        # 8 ── final coordinator + gate
+        # 8 ── stage 4: final coordinator + gate, then the closing synthesis
+        rec.set_stage("final_coordinator")
         await self._run_agent("human_review_coordinator", state, ctx, audit, stage="final_coordinator")
-        audit.note("claim_validation", "validate_final_claims",
-                   reason=f"{ClaimValidator(state, known_labels).summary()}")
+        close_disputes(state)
+        if collab:
+            state.set_phase("synthesis")
+            rf = state.next_round()
+            self._xstep(state, rec, "human_review_coordinator", "final_synthesis",
+                        lambda a: a.final_synthesis(state, ctx, rf), rf)
+        syn = next((m for m in reversed(state.messages) if m.kind == "SYNTHESIS"), None)
+        rec.event(EventType.FINAL_SYNTHESIS_GENERATED, actor="human_review_coordinator",
+                  message_id=syn.message_id if syn else None,
+                  evidence_ids=state.coordinator_output.evidence_ids[:8] if state.coordinator_output else [],
+                  payload={"final_label": state.final_label, "final_diagnosis": state.final_diagnosis[:500],
+                           "confidence": state.confidence.confidence if state.confidence else None,
+                           "review_decision": state.review.decision if state.review else None})
+        claim_sum = ClaimValidator(state, known_labels).summary()
+        audit.note("claim_validation", "validate_final_claims", reason=f"{claim_sum}")
+        rec.set_stage("claim_validation")
+        rec.event(EventType.CLAIM_VALIDATED, actor="harness", payload={"scope": "all agent and final output", **claim_sum})
         audit.note("review_gate", state.review.decision if state.review else "n/a",
                    reason="; ".join(state.review.reasons) if state.review and state.review.reasons else "all criteria passed",
                    status="warning" if state.review and state.review.decision != "AUTO_RESOLVE" else "ok",
                    agent="human_review_coordinator")
+        rec.set_stage("review_gate")
+        if state.review:
+            rec.event(EventType.HUMAN_REVIEW_TRIGGERED if state.review.decision == "REQUIRES_HUMAN_REVIEW"
+                      else EventType.REVIEW_GATE_PASSED, actor="human_review_coordinator",
+                      payload={"decision": state.review.decision, "reasons": state.review.reasons,
+                               "criteria": [c.model_dump() for c in state.review.criteria]})
 
         latency_ms = (time.perf_counter() - t_start) * 1000
         return self._build_response(state, ctx, kb, latency_ms)
@@ -251,24 +359,50 @@ class AgentOrchestrator:
         state.council["confidence_before_id"] = derived_id(state, "council:confidence_before",
                                                            "Measured confidence before the agent council", value=before)
         audit.note("council", "convene", reason="; ".join(reasons), status="loop")
+        rec = state._trace
+
+        def _traced_precedent(st, pair, chans, mode=None):
+            res = self._focused_precedent(st, ctx, retriever, pair, chans, mode)
+            if rec:
+                rec.tool_call(None, "focused_precedent", {"pair": list(pair), "channels": list(chans), "mode": mode},
+                              {"share": (res or {}).get("share"), "evidence_ids": (res or {}).get("evidence_ids", []),
+                               "derived_id": (res or {}).get("derived_id")})
+            return res
+
+        def _traced_label_evidence(label):
+            added = self._council_label_evidence(state, retriever, label)
+            if rec:
+                rec.tool_call(None, "request_label_evidence", {"label": label}, {"evidence_ids": added})
+            return added
+
         tools = CouncilTools(
-            focused_precedent=lambda st, pair, chans, mode=None: self._focused_precedent(st, ctx, retriever, pair, chans, mode),
-            request_label_evidence=lambda label: self._council_label_evidence(state, retriever, label),
+            focused_precedent=_traced_precedent,
+            request_label_evidence=_traced_label_evidence,
             reported_channels=sorted(state.profile.sensors) if state.profile else [])
         order = ["ambiguity", "verification", "diagnostic_expert", "pattern_agent", "aggressive_agent"]
         last_round = 0
-        for r in range(1, COUNCIL_MAX_ROUNDS + 1):
+        state.set_phase("council")
+        first = state.round_counter + 1
+        state.council["first_round"] = first
+        for r in range(first, first + COUNCIL_MAX_ROUNDS):
             last_round = r
             ev_before = len(state.evidence)
+            if rec:
+                rec.event(EventType.COUNCIL_ROUND_STARTED, actor="harness", payload={"round": r})
             for key in order:
                 t0 = time.perf_counter()
                 n0 = len(state.messages)
+                xid = rec.begin_execution(key, stage="council", kind="deliberate", state=state, round_no=r) if rec else None
                 try:
                     self.agents[key].deliberate(state, ctx, r, tools)
                 except Exception as exc:            # a council failure never breaks the diagnosis
                     logger.exception("Council: %s failed", key)
                     audit.note("council", f"{key}.deliberate", reason=str(exc)[:200], status="error", agent=key)
+                    if rec:
+                        rec.end_execution(xid, state, status="FAILED", error=f"{type(exc).__name__}: {exc}")
                     continue
+                if rec:
+                    rec.end_execution(xid, state, extra_output={"messages_posted": [m.message_id for m in state.messages[n0:]]})
                 new = state.messages[n0:]
                 if new:
                     audit.note("council", f"{key}.deliberate (round {r})", agent=key, status="ok",
@@ -294,6 +428,9 @@ class AgentOrchestrator:
                 res = apply_pair_resolution(state, a, b, item["shares"], r)
                 if res:
                     changed = material = True
+                    if rec:
+                        rec.event(EventType.HYPOTHESES_SCORED, actor="harness", evidence_ids=[res["derived_id"]],
+                                  payload={"source": "council_joint_pair_resolution", "round": r, **res})
                     audit.note("council", "joint_pair_resolution", status="loop", evidence_used=[res["derived_id"]],
                                reason=(f"{a} vs {b}: joint share {res['joint_share'][a]:.2f} from {', '.join(res['sources'])}; "
                                        f"scores {res['before'][a]:.2f}/{res['before'][b]:.2f} → {res['after'][a]:.2f}/{res['after'][b]:.2f}"))
@@ -310,6 +447,12 @@ class AgentOrchestrator:
                     state.council["position_changes"].append({"agent": m.sender, "agent_name": PERSONA_CATALOG[m.sender]["agent_name"],
                                                               "from": old, "to": rep.finding_label, "round": r,
                                                               "message": m.message_id})
+                    if rec:
+                        if old:
+                            rec.hypothesis(m.sender, old, HypothesisStatus.REJECTED, message_id=m.message_id, round_no=r,
+                                           reason=f"conceded in council round {r}")
+                        rec.hypothesis(m.sender, rep.finding_label, HypothesisStatus.MODIFIED, message_id=m.message_id,
+                                       round_no=r, evidence_ids=m.evidence_ids, reason=f"adopted via concession {m.message_id}")
                     changed = material = True
             if changed:
                 de_before = state.diagnostic_expert_output.finding_label if state.diagnostic_expert_output else None
@@ -327,8 +470,15 @@ class AgentOrchestrator:
                 await self._run_agent("verification", state, ctx, audit, stage="council", status="loop")
                 await self._run_agent("ambiguity", state, ctx, audit, stage="council", status="loop")
             mark_resolved(state, r)
-            state.council["rounds"] = r
-            if not material or not should_convene(state, ctx.kb.has_numeric())[0]:
+            state.council["rounds"] = r - first + 1
+            again = material and should_convene(state, ctx.kb.has_numeric())[0]
+            if rec:
+                rec.event(EventType.COUNCIL_ROUND_COMPLETED, actor="harness",
+                          payload={"round": r, "messages": sum(1 for m in state.messages if m.round == r),
+                                   "material_change": material, "another_round": bool(again and r < first + COUNCIL_MAX_ROUNDS - 1),
+                                   "reached_max_rounds": r == first + COUNCIL_MAX_ROUNDS - 1 and bool(again),
+                                   "confidence": state.confidence.confidence if state.confidence else None})
+            if not again:
                 break
 
         after = state.confidence.confidence if state.confidence else 0.0
@@ -338,7 +488,11 @@ class AgentOrchestrator:
         state.council["confidence_after_id"] = derived_id(state, "council:confidence_after",
                                                           "Measured confidence after the agent council", value=after)
         t0 = time.perf_counter()
+        xid = rec.begin_execution("human_review_coordinator", stage="council", kind="deliberate", state=state,
+                                  round_no=last_round) if rec else None
         self.human_review_coordinator.deliberate(state, ctx, last_round, tools)
+        if rec:
+            rec.end_execution(xid, state, extra_output={"messages_posted": [state.messages[-1].message_id] if state.messages else []})
         audit.note("council", "human_review_coordinator.deliberate (synthesis)", agent="human_review_coordinator",
                    status="ok", reason=state.messages[-1].text[:200] if state.messages else "")
         state.audit_trail[-1].duration_ms = round((time.perf_counter() - t0) * 1000, 2)
@@ -352,7 +506,7 @@ class AgentOrchestrator:
         m = mode or state.data_mode
         if m not in ctx.kb.available_modes():
             return None
-        rr = retriever.retrieve(prof, m, top_k=self._top_k, exclude_ids=self._excl, historical_k=40)
+        rr = retriever.retrieve(prof, m, top_k=state._run_opts['top_k'], exclude_ids=state._run_opts['excl'], historical_k=40)
         hist = rr.stats.get("historical_support") or {}
         a, b = pair
         sa, sb = float(hist.get(a, 0.0)), float(hist.get(b, 0.0))
@@ -361,7 +515,7 @@ class AgentOrchestrator:
         share = {a: round(sa / (sa + sb), 3), b: round(sb / (sa + sb), 3)}
         rr.bundle = [c for c in rr.bundle if c.record.label in (a, b)]
         rnd = state.feedback_rounds + 1 + int(state.council.get("rounds", 0))
-        added = self._ingest(state, rr, round_no=rnd, limit=2)
+        added = self._ingest(state, rr, round_no=rnd, limit=2, action=f"council_precedent:{a} vs {b}")
         self._merge_stats(state, rr, f"council_precedent:{a} vs {b}", added, rnd, update_historical=False)
         did = derived_id(state, f"precedent:{a}|{b}:{m}:{','.join(channels)}",
                          f"Share of nearest {m.upper()} cases labelled '{a}' among '{a}'/'{b}' on channels {', '.join(channels)}",
@@ -369,17 +523,45 @@ class AgentOrchestrator:
         return {"share": share, "evidence_ids": added, "derived_id": did, "support": hist}
 
     def _council_label_evidence(self, state: DiagnosticState, retriever: MultiStageRetriever, label: str) -> List[str]:
-        rr = retriever.retrieve(state.profile, state.data_mode, top_k=3, exclude_ids=self._excl, label_filter=[label])
+        rr = retriever.retrieve(state.profile, state.data_mode, top_k=3, exclude_ids=state._run_opts['excl'], label_filter=[label])
         rnd = state.feedback_rounds + 1 + int(state.council.get("rounds", 0))
-        added = self._ingest(state, rr, round_no=rnd, limit=2)
+        added = self._ingest(state, rr, round_no=rnd, limit=2, action=f"council_label_evidence:{label}")
         self._merge_stats(state, rr, f"council_label_evidence:{label}", added, rnd, update_historical=False)
         return added
+
+    def _xstep(self, state: DiagnosticState, rec, key: str, step: str, fn, round_no: Optional[int] = None) -> List[Any]:
+        """Run one exchange-stage step of agent ``key`` as a traced execution. A failing step is recorded
+        and skipped; it never breaks the diagnosis."""
+        n0 = len(state.messages)
+        xid = rec.begin_execution(key, stage=state._phase, kind=step, state=state, round_no=round_no)
+        try:
+            out = fn(self.agents[key]) or []
+        except Exception as exc:
+            logger.exception("Exchange step %s.%s failed", key, step)
+            rec.end_execution(xid, state, status="FAILED", error=f"{type(exc).__name__}: {exc}")
+            return []
+        rec.end_execution(xid, state, extra_output={"messages_posted": [m.message_id for m in state.messages[n0:]]})
+        return out
 
     # ─────────────────────────────────────────────────────────────────────────
     async def _run_agent(self, key: str, state: DiagnosticState, ctx: AgentContext, audit: AuditRecorder,
                          stage: str, status: str = "ok", **kwargs) -> AgentReport:
         agent = self.agents[key]
         t0 = time.perf_counter()
+        rec = state._trace
+        xid = None
+        if rec:
+            prof = state.profile
+            xid = rec.begin_execution(key, stage=stage, kind="analyze", state=state, pass_number=1 + state.feedback_rounds,
+                                      input_summary={
+                                          "stage": stage, "arguments": sorted(kwargs),
+                                          "query_sensors": prof.sensors if prof else {},
+                                          "missing_sensors": prof.missing_sensors if prof else [],
+                                          "evidence_records": len(state.evidence), "derived_values": len(state.derived),
+                                          "scored_hypotheses": [(h["label"], h["score"]) for h in state.analysis.get("hypotheses", [])[:4]],
+                                          "messages_on_board": len(state.messages),
+                                          "llm_enabled": ctx.llm_enabled and agent.uses_llm})
+        failed = None
         try:
             report = await agent.analyze(state, ctx, **kwargs)
             ev_status = status
@@ -387,9 +569,25 @@ class AgentOrchestrator:
         except Exception as exc:          # partial failure: keep the pipeline alive
             logger.exception("Agent %s failed", key)
             report = AgentReport(agent=key, display_name=PERSONA_CATALOG[key]["agent_name"],
-                                 finding="Agent failed", narrative=f"Agent error: {exc}", confidence=0.0)
+                                 finding="Agent failed", narrative=f"Agent error: {exc}", confidence=0.0,
+                                 extras={"failed": True})
             ev_status, reason = "error", str(exc)
+            failed = f"{type(exc).__name__}: {exc}"
+        if rec:
+            rec.end_execution(xid, state, report=None if failed else report,
+                              status="FAILED" if failed else "COMPLETED", error=failed)
+            if key == "ambiguity" and state.confidence and not failed:
+                rec.event(EventType.CONFIDENCE_RECALCULATED, actor=key, execution_id=xid,
+                          payload={"confidence": state.confidence.confidence, "source": stage,
+                                   "evidence_confidence": state.confidence.evidence_confidence,
+                                   "council_confidence": state.confidence.council_confidence,
+                                   "formula": state.confidence.formula,
+                                   "factors": [f.model_dump() for f in state.confidence.factors]})
         setattr(state, STATE_SLOT[key], report)
+        if not failed and stage != "phase1" and key in FIRST_PASS and state.collab.get("positions"):
+            moved = reapply_position(self.agents, state, ctx, key, rec)
+            if moved:
+                reason = f"{report.finding} (council position re-applied after re-execution)"
         audit.note(stage, f"{key}.analyze (pass {report.pass_number})", reason=reason[:200], status=ev_status,
                    agent=key, evidence_used=list(dict.fromkeys(report.evidence_ids))[:12])
         state.audit_trail[-1].duration_ms = round((time.perf_counter() - t0) * 1000, 2)
@@ -398,7 +596,7 @@ class AgentOrchestrator:
 
     # ── evidence handling ────────────────────────────────────────────────────
     def _ingest(self, state: DiagnosticState, rr: RetrievalResult, round_no: int, replace: bool = False,
-                limit: Optional[int] = None) -> List[str]:
+                limit: Optional[int] = None, action: str = "retrieval") -> List[str]:
         if replace:
             state.evidence = []
             state.retrieval_stats = dict(rr.stats)
@@ -423,6 +621,9 @@ class AgentOrchestrator:
         if replace:
             state.retrieval_stats["rounds"][0]["added"] = len(added)
         state.retrieval_quality = float(state.retrieval_stats.get("mean_top5_fused", 0.0))
+        if state._trace and added:
+            by = state.evidence_by_id()
+            state._trace.evidence_added([by[i] for i in added], action=action, round_no=round_no)
         return added
 
     def _merge_stats(self, state: DiagnosticState, rr: RetrievalResult, action: str, added: List[str],
@@ -506,14 +707,18 @@ class AgentOrchestrator:
                         retriever: MultiStageRetriever, audit: AuditRecorder) -> Optional[Dict]:
         r = state.feedback_rounds
         prof = state.profile
+        if state._trace and d.action != "strip_unsupported_claims":
+            state._trace.event(EventType.TARGETED_RETRIEVAL_STARTED, actor="harness",
+                               payload={"deficiency": d.code, "detail": d.detail, "action": d.action,
+                                        "feedback_round": r, "rerun": d.rerun})
         with audit.step("targeted_rag" if d.action != "strip_unsupported_claims" else "claim_validation",
                         d.action, reason=f"{d.code}: {d.detail}") as ev:
             ev.status = "loop"
             if d.action in ("historical_retrieval", "expanded_historical_search"):
                 expand = 3.0 if d.action == "expanded_historical_search" else 2.5
-                rr = retriever.retrieve(prof, state.data_mode, top_k=self._top_k, exclude_ids=self._excl,
+                rr = retriever.retrieve(prof, state.data_mode, top_k=state._run_opts['top_k'], exclude_ids=state._run_opts['excl'],
                                         expand=expand, historical_k=60)
-                added = self._ingest(state, rr, round_no=r, limit=4)
+                added = self._ingest(state, rr, round_no=r, limit=4, action=d.action)
                 self._merge_stats(state, rr, d.action, added, r, update_historical=True)
                 ev.evidence_used, ev.retrieval_count = added, len(added)
                 return {"evidence_ids": added}
@@ -521,24 +726,24 @@ class AgentOrchestrator:
                 hyps = state.analysis.get("hypotheses", [])[:2]
                 added_all: List[str] = []
                 for h in hyps:
-                    rr = retriever.retrieve(prof, state.data_mode, top_k=3, exclude_ids=self._excl,
+                    rr = retriever.retrieve(prof, state.data_mode, top_k=3, exclude_ids=state._run_opts['excl'],
                                             label_filter=[h["label"]])
-                    added = self._ingest(state, rr, round_no=r, limit=3)
+                    added = self._ingest(state, rr, round_no=r, limit=3, action=f"{d.action}:{h['label']}")
                     self._merge_stats(state, rr, f"{d.action}:{h['label']}", added, r, update_historical=False)
                     added_all += added
                 ev.evidence_used, ev.retrieval_count = added_all, len(added_all)
                 return {"evidence_ids": added_all, "pair": [h["label"] for h in hyps]}
             if d.action == "expanded_rerank":
-                rr = retriever.retrieve(prof, state.data_mode, top_k=self._top_k, exclude_ids=self._excl,
+                rr = retriever.retrieve(prof, state.data_mode, top_k=state._run_opts['top_k'], exclude_ids=state._run_opts['excl'],
                                         expand=3.0, k_sem=120)
-                added = self._ingest(state, rr, round_no=r, limit=4)
+                added = self._ingest(state, rr, round_no=r, limit=4, action=d.action)
                 self._merge_stats(state, rr, d.action, added, r, update_historical=True)
                 ev.evidence_used, ev.retrieval_count = added, len(added)
                 return {"evidence_ids": added}
             if d.action == "metadata_filtered_retrieval":
-                rr = retriever.retrieve(prof, state.data_mode, top_k=self._top_k * 3, exclude_ids=self._excl, expand=2.0)
+                rr = retriever.retrieve(prof, state.data_mode, top_k=state._run_opts['top_k'] * 3, exclude_ids=state._run_opts['excl'], expand=2.0)
                 rr.bundle = [c for c in rr.bundle if c.record.equipment_type == prof.equipment_type][:4]
-                added = self._ingest(state, rr, round_no=r, limit=4)
+                added = self._ingest(state, rr, round_no=r, limit=4, action=d.action)
                 self._merge_stats(state, rr, d.action, added, r, update_historical=False)
                 ev.evidence_used, ev.retrieval_count = added, len(added)
                 return {"evidence_ids": added}
@@ -561,6 +766,10 @@ class AgentOrchestrator:
                     removed += sum(1 for c in checks if c.action == "removed")
                     rep.claims_removed += removed
                 ev.reason += f" → removed {removed}"
+                if state._trace:
+                    state._trace.event(EventType.CLAIM_VALIDATED, actor="harness",
+                                       payload={"scope": "first-pass agent output", "action": d.action,
+                                                "removed": removed, "feedback_round": r})
                 return None
         return None
 
@@ -655,6 +864,8 @@ class AgentOrchestrator:
             "timeline": [a.model_dump() for a in state.audit_trail],
             "messages": [m.model_dump() for m in state.messages],
             "council": council_summary(state),
+            "collaboration": collab_summary(state),
+            "trace_id": getattr(state._trace, "trace_id", None),
             "latency_ms": round(latency_ms, 1),
             "declared_rule_thresholds": RULE_THRESHOLDS,
             "knowledge_base": {st: len(p.records) for st, p in kb.partitions.items()},

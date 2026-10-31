@@ -13,6 +13,15 @@ def run(orch, kb, q, mode="combined"):
 def test_clear_case_does_not_convene(orchestrator, small_kb):
     h = run(orchestrator, small_kb, CLEAR_BEARING)["harness"]
     assert h["council"]["convened"] is False
+    # the escalation council posts nothing; the agents still collaborate on every case
+    assert [m for m in h["messages"] if m["phase"] == "council"] == []
+    assert any(m["phase"] == "collaboration" for m in h["messages"])
+    assert h["council"]["messages"] == 0
+
+
+def test_collaboration_off_restores_silent_clear_case(orchestrator, small_kb, monkeypatch):
+    monkeypatch.setenv("COLLAB_MODE", "off")
+    h = run(orchestrator, small_kb, CLEAR_BEARING)["harness"]
     assert h["messages"] == []
 
 
@@ -22,6 +31,7 @@ def test_hard_case_convenes_and_messages_are_traceable(orchestrator, small_kb):
     assert c["convened"] and c["reasons"]
     msgs = h["messages"]
     assert [m["message_id"] for m in msgs] == [f"M-{i + 1:03d}" for i in range(len(msgs))]
+    council_msgs = [m for m in msgs if m["phase"] == "council"]
     valid = {e["evidence_id"] for e in h["evidence"]} | {d["derived_id"] for d in h["derived_values"]}
     assert all(set(m["evidence_ids"]) <= valid for m in msgs)
     assert msgs[-1]["kind"] == "SYNTHESIS" and msgs[-1]["sender"] == "human_review_coordinator"
@@ -35,7 +45,7 @@ def test_hard_case_convenes_and_messages_are_traceable(orchestrator, small_kb):
 def test_council_off_posts_nothing(orchestrator, small_kb, monkeypatch):
     monkeypatch.setattr(council, "COUNCIL_MODE", "off")
     h = run(orchestrator, small_kb, MISSING_TEMP)["harness"]
-    assert h["council"]["convened"] is False and h["messages"] == []
+    assert h["council"]["convened"] is False and [m for m in h["messages"] if m["phase"] == "council"] == []
 
 
 def test_rapid_triage_holds_on_safety_rule(orchestrator, small_kb, monkeypatch):

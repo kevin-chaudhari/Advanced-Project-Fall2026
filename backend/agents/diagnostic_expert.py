@@ -178,6 +178,51 @@ class DiagnosticExpertAgent(BaseAgent):
                                          evidence_ids=added, payload={"label": b, "added": added}, resolved=bool(added)))
         return posted
 
+    # ── collaborative council ───────────────────────────────────────────────
+    COLLAB_OPENNESS = 0.5          # the integrator: listens most, but keeps half its own evidence view
+
+    def collab_view(self, state: DiagnosticState, ctx: AgentContext, candidates: List[str]):
+        from harness.collaboration import View
+        scores = {h["label"]: h["score"] for h in state.analysis.get("hypotheses", [])}
+        rep = state.diagnostic_expert_output
+        mine = {h.label: h for h in (rep.hypotheses if rep else [])}
+        why, ids = {}, {}
+        for c in candidates:
+            h = mine.get(c)
+            parts = [f"evidence score {scores.get(c, 0.0):.2f}"]
+            if h:
+                parts.append(f"{len(h.supporting)} supporting / {len(h.contradicting)} contradicting statement(s)")
+                if h.contradicting:
+                    parts.append(h.contradicting[0].statement.split(" [")[0].lower())
+            why[c] = "; ".join(parts)
+            ids[c] = list(dict.fromkeys((h.evidence_ids[:3] if h else [])
+                                        + [i for st in ((h.supporting[:2] + h.contradicting[:1]) if h else []) for i in st.evidence_ids]))
+        if not any(scores.get(c, 0.0) for c in candidates):
+            return View(support={}, abstain=True, abstain_reason="no candidate has an evidence score")
+        return View(support={c: scores.get(c, 0.0) for c in candidates}, why=why, ids=ids,
+                    method="hypothesis evidence scores (signature fit + case vote)")
+
+    def collab_answer(self, state: DiagnosticState, ctx: AgentContext, a: str, b: str, view):
+        if a not in ctx.ref.signatures or b not in ctx.ref.signatures:
+            return None
+        t = self.pair_signature_test(state, ctx, a, b)
+        if not t["share"]:
+            return (f"None of the channels that separate {a} from {b} were reported, so my signatures cannot split them.",
+                    [], None, {"channels": [], "unreported": t["unreported"]})
+        tot = view.support.get(a, 0.0) + view.support.get(b, 0.0)
+        before = {a: view.support.get(a, 0.0), b: view.support.get(b, 0.0)}
+        view.support[a] = 0.5 * before[a] + 0.5 * tot * t["share"][a]      # fold the test into my own view
+        view.support[b] = 0.5 * before[b] + 0.5 * tot * t["share"][b]
+        fav = a if t["share"][a] >= t["share"][b] else b
+        text = (f"Discriminating-channel test, {a} vs {b}: " + "; ".join(t["notes"])
+                + f". The signatures favour {fav} ({t['share'][fav]:.0%} of the pairwise fit); I fold this into my position.")
+        return text, t["ids"], t["share"], {"channels": t["used"], "unreported": t["unreported"], "favours": fav,
+                                            "view_before": {k: round(v, 3) for k, v in before.items()},
+                                            "view_after": {a: round(view.support[a], 3), b: round(view.support[b], 3)}}
+
+    def collab_finding_text(self, report, new, old):
+        return new
+
     def llm_task(self, state, ctx, report, **_):
         return ("Review the draft. Return JSON {\"hypotheses\": [{\"label\": str, \"supporting\": [{\"statement\": str, "
                 "\"evidence_ids\": [..]}], \"contradicting\": [...], \"missing\": [str]}], \"narrative\": str}. "

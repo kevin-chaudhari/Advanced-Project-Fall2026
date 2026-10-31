@@ -161,7 +161,7 @@ export default function OverviewPage() {
             <div className="space-y-4 text-[14px] leading-relaxed text-ink">
               <div><h3 className="font-semibold">Traceable evidence</h3><p className="mt-1">Retrieved records are numbered EV-001, EV-002 and so on; values the system calculates are numbered D-001 onwards. Each record is labelled REAL or SYNTHETIC so you always know where support comes from.</p></div>
               <div><h3 className="font-semibold">Confidence from factors</h3><p className="mt-1">Evidence quality, separation from the runner-up, historical similarity, data completeness, contradictions, retrieval quality, agent agreement and reliance on synthetic data each pull confidence down when they are weak.</p></div>
-              <div><h3 className="font-semibold">Agent council</h3><p className="mt-1">When confidence is below 0.65, two faults are within 0.15 of each other, or the first agents disagree, all six agents exchange typed messages (questions, challenges, evidence, concessions) before the final answer. Confidence can only move on evidence.</p></div>
+              <div><h3 className="font-semibold">Agent council</h3><p className="mt-1">After a short private draft, the six agents work every case out together: they share positions, question and challenge each other, and revise until they agree on a joint finding. Hard cases go on to an escalation council. Their agreed confidence can lower the evidence confidence, never raise it.</p></div>
             </div>
             <div className="card p-5">
               <h3 className="text-[15px] font-semibold text-ink">The human-review gate</h3>

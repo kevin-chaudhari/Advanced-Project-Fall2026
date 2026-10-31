@@ -170,6 +170,58 @@ class PatternRecognitionAgent(BaseAgent):
                                                   "channels": chans, "favours": fav}))
         return posted
 
+    # ── collaboration helpers ───────────────────────────────────────────────
+    def _precedent_ids(self, state: DiagnosticState, label: str) -> List[str]:
+        """Cite only IDs this agent already produced: its share statement for ``label`` and its nearest cases."""
+        rep = state.pattern_output
+        ids: List[str] = []
+        for st in (rep.supporting_evidence + rep.contradicting_evidence) if rep else []:
+            if label and label in st.statement and "nearest" in st.statement:
+                ids += [i for i in st.evidence_ids if i.startswith("D-")]
+        nearest = set((rep.extras.get("nearest_cases") or []) if rep else [])
+        ids += [e.evidence_id for e in state.evidence if e.evidence_id in nearest and e.label == label][:3]
+        return list(dict.fromkeys(ids))
+
+    COLLAB_OPENNESS = 0.35         # data scientist: moves only when other evidence is strong
+
+    def collab_view(self, state: DiagnosticState, ctx: AgentContext, candidates: List[str]):
+        from harness.collaboration import View
+        rep = state.pattern_output
+        if not rep:
+            return View(support={}, abstain=True, abstain_reason="no pattern analysis available")
+        if rep.extras.get("no_historical_match"):
+            return View(support={}, abstain=True, method="historical precedent",
+                        abstain_reason="the closest historical case is beyond the calibrated similarity threshold, "
+                                       "so precedent cannot rank the candidates")
+        hist: Dict[str, float] = rep.extras.get("label_distribution") or {}
+        method = "nearest-case precedent (similarity-weighted label shares)"
+        if not any(hist.get(c, 0.0) for c in candidates):
+            hist = {}
+            for e in state.evidence:
+                if e.label:
+                    hist[e.label] = hist.get(e.label, 0.0) + e.retrieval_score
+            method = "label vote of the retrieved records"
+            if not any(hist.get(c, 0.0) for c in candidates):
+                return View(support={}, abstain=True, method=method,
+                            abstain_reason="no retrieved case carries any of the candidate labels")
+        tot = sum(hist.get(c, 0.0) for c in candidates) or 1.0
+        why = {c: f"{hist.get(c, 0.0) / tot:.0%} of the nearest-case share among the candidates is {c}" for c in candidates}
+        ids = {c: self._precedent_ids(state, c) for c in candidates}
+        return View(support={c: hist.get(c, 0.0) for c in candidates}, why=why, ids=ids, method=method)
+
+    def collab_answer(self, state: DiagnosticState, ctx: AgentContext, a: str, b: str, view):
+        sa, sb = view.support.get(a, 0.0), view.support.get(b, 0.0)
+        if sa + sb <= 0:
+            return (f"No nearby historical case carries {a} or {b}; precedent cannot separate them.", [], None, {})
+        share = {a: round(sa / (sa + sb), 3), b: round(sb / (sa + sb), 3)}
+        fav = a if share[a] >= share[b] else b
+        return ((f"Precedent between the two: {share[a]:.0%} {a} vs {share[b]:.0%} {b} among the nearest cases that carry "
+                 f"either label; history favours {fav}."),
+                self._precedent_ids(state, a) + self._precedent_ids(state, b), share, {"favours": fav})
+
+    def collab_finding_text(self, report, new, old):
+        return new
+
     def llm_task(self, state, ctx, report, **_):
         return ("Describe the recurring patterns across the EVIDENCE. Return JSON {\"narrative\": str, "
                 "\"supporting_evidence\": [{\"statement\": str, \"evidence_ids\": [..]}]}. "

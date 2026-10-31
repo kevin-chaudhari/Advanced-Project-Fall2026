@@ -126,6 +126,72 @@ class AggressiveDecisionAgent(BaseAgent):
                            extras={"rapid_signal": signal, "severity": severity, "rules_fired": rules_fired,
                                    "out_of_band": directions, "consistency_violations": violations})
 
+    # ── collaboration helpers ───────────────────────────────────────────────
+    def _band_ids(self, rep: AgentReport, channels) -> List[str]:
+        out: List[str] = []
+        for st in rep.supporting_evidence:
+            if st.statement.startswith("R-B1") and any(sensor_name(c) in st.statement for c in channels):
+                out += st.evidence_ids
+        return list(dict.fromkeys(out))
+
+    def _rsig(self, label: str, directions: Dict[str, str], ctx: AgentContext):
+        ks = dict(key_sensors(label, ctx.ref)) if label in ctx.ref.signatures else {}
+        match = [s_ for s_, d in directions.items() if s_ in ks and ((ks[s_] > 0) == (d == "high"))]
+        clash = [s_ for s_, d in directions.items() if s_ in ks and ((ks[s_] > 0) != (d == "high"))]
+        return match, clash
+
+    COLLAB_OPENNESS = 0.25         # safety-first: hard to move
+    COLLAB_CRITIQUE = "CHALLENGE"
+
+    def collab_openness(self, state: DiagnosticState) -> float:
+        rep = state.rapid_triage_output
+        return 0.0 if rep and rep.extras.get("consistency_violations") else self.COLLAB_OPENNESS   # never drops a safety signal
+
+    def collab_view(self, state: DiagnosticState, ctx: AgentContext, candidates: List[str]):
+        from harness.collaboration import View
+        rep = state.rapid_triage_output
+        if not rep or rep.extras.get("rapid_signal") is None:
+            return View(support={}, abstain=True, method="triage rules", abstain_reason="no sensor readings to apply rules to")
+        violations = rep.extras.get("consistency_violations") or []
+        directions = rep.extras.get("out_of_band") or {}
+        if violations:
+            if "Sensor Malfunction" not in candidates:
+                return View(support={}, abstain=True, method="consistency rules",
+                            abstain_reason="the readings break consistency rules, so no fault label can be trusted")
+            sup = {c: (0.85 if c == "Sensor Malfunction" else 0.15 / max(1, len(candidates) - 1)) for c in candidates}
+            why = {c: ("readings break " + ", ".join(v["rule_id"] for v in violations) if c == "Sensor Malfunction"
+                       else "cannot be trusted while " + ", ".join(v["rule_id"] for v in violations) + " is violated")
+                   for c in candidates}
+            return View(support=sup, why=why, ids={c: [] for c in candidates}, method="consistency rules (R-C*)")
+        if not directions and not (state.profile and state.profile.qualitative):
+            if "Normal Operation" in candidates:
+                sup = {c: (0.6 if c == "Normal Operation" else 0.4 / max(1, len(candidates) - 1)) for c in candidates}
+                return View(support=sup, method="band rule (R-B1)",
+                            why={c: "no channel is outside its reference band" for c in candidates},
+                            ids={c: [] for c in candidates})
+            return View(support={}, abstain=True, method="band rule (R-B1)",
+                        abstain_reason="no channel is outside its reference band, so my rules do not point at any fault")
+        from harness.analysis import centroid_fit
+        fits = {c: (centroid_fit(c, state.profile, ctx.ref) or 0.0) if state.profile and state.profile.sensors else 0.0
+                for c in candidates}
+        tf = sum(fits.values()) or 1.0
+        sup, why, ids = {}, {}, {}
+        for c in candidates:
+            if c == "Normal Operation":
+                sup[c], why[c] = 0.1, f"{len(directions)} channel(s) are outside the reference band"
+                ids[c] = self._band_ids(rep, list(directions))
+                continue
+            match, clash = self._rsig(c, directions, ctx)
+            raw = max(0.1, 1.0 + 2.0 * len(match) - 1.5 * len(clash)) * (0.5 + fits[c] / tf)
+            sup[c] = raw
+            why[c] = ("fits the out-of-band " + ", ".join(sensor_name(x) for x in match) if match else "no out-of-band channel in its signature") \
+                + ("; clashes with " + ", ".join(sensor_name(x) for x in clash) if clash else "")
+            ids[c] = self._band_ids(rep, match + clash)
+        return View(support=sup, why=why, ids=ids, method="signature-direction rule (R-SIG) on out-of-band channels")
+
+    def collab_finding_text(self, report, new, old):
+        return f"{new} (agreed in the council; rapid signal was {old or 'none'}, severity {report.extras.get('severity')})"
+
     # ── council: rules-only answers ─────────────────────────────────────────
     def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
         """Persona: fast, safety-first triage officer with no LLM. He never argues from data he does not
@@ -175,7 +241,7 @@ class AggressiveDecisionAgent(BaseAgent):
                                          else "No consistency rule fired; the instrumentation looks plausible.",
                                          payload={"rules": [v["rule_id"] for v in violations]}))
                 m.resolved = True
-        if round_no == 1 and severity in ("HIGH", "CRITICAL"):
+        if round_no == state.council.get("first_round", 1) and severity in ("HIGH", "CRITICAL"):
             posted.append(state.post(round=round_no, sender=self.key, kind="RISK_FLAG", recipients=["human_review_coordinator"],
                                      topic="severity", text=f"Severity triage {severity}: whatever the label, do not delay the inspection.",
                                      payload={"severity": severity}))

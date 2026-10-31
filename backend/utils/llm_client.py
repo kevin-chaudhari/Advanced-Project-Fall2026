@@ -15,7 +15,8 @@ Two entry points:
 import json
 import os
 import re
-from typing import Any, Dict
+import time
+from typing import Any, Dict, Optional
 
 import httpx
 
@@ -470,42 +471,67 @@ class LLMClient:
             return bool(self.openai_key) and not self.openai_key.startswith("sk-your")
         return self.provider == "ollama"
 
-    async def generate_json(self, prompt: str, system: str = "") -> Dict[str, Any] | None:
+    async def generate_json(self, prompt: str, system: str = "", model: Optional[str] = None,
+                            temperature: Optional[float] = None) -> Dict[str, Any] | None:
         """Call the real LLM and parse JSON.  Returns None (never mock data) on
         any failure so callers fall back to deterministic analysis."""
         if not self.is_available():
             return None
+        t0 = time.perf_counter()
         try:
             if self.provider == "openai":
-                raw = await self._openai_raw(prompt, system)
+                raw = await self._openai_raw(prompt, system, model=model, temperature=temperature)
             else:
-                raw = await self._ollama_raw(prompt, system)
+                raw = await self._ollama_raw(prompt, system, model=model, temperature=temperature)
         except Exception as exc:
             logger.warning("LLM call failed (%s) — deterministic fallback.", exc)
+            self._trace_call(prompt, system, None, False, f"{type(exc).__name__}: {exc}", t0, model)
             return None
         if not raw:
+            self._trace_call(prompt, system, raw, False, "empty response", t0, model)
             return None
         parsed = self.extract_json(raw)
+        self._trace_call(prompt, system, raw, bool(parsed), None if parsed else "response was not valid JSON", t0, model)
         return parsed or None
 
-    async def _openai_raw(self, prompt: str, system: str) -> str:
+    def _trace_call(self, prompt: str, system: str, raw: Optional[str], ok: bool, error: Optional[str], t0: float,
+                    model: Optional[str] = None) -> None:
+        """Report the exact rendered model input to AgentTrace (no keys or headers are passed)."""
+        try:
+            from harness.agent_trace.trace_manager import notify_llm_call
+            notify_llm_call(provider=self.provider,
+                            model=model or (self.openai_model if self.provider == "openai" else self.ollama_model),
+                            system=system or "", prompt=prompt, response=raw, ok=ok, error=error,
+                            duration_ms=(time.perf_counter() - t0) * 1000)
+        except Exception as exc:  # tracing must never affect the model call
+            logger.debug("trace hook failed: %s", exc)
+
+    async def _openai_raw(self, prompt: str, system: str, model: Optional[str] = None,
+                          temperature: Optional[float] = None) -> str:
+        m = model or self.openai_model
+        reasoning = m.startswith(("o1", "o3", "o4", "gpt-5"))   # reasoning models reject temperature/max_tokens
         payload = {
-            "model": self.openai_model,
+            "model": m,
             "messages": [{"role": "system", "content": system or "Respond with a single JSON object."},
                          {"role": "user", "content": prompt}],
-            "temperature": 0.1,
-            "max_tokens": min(self.openai_max_tokens, 2048),
             "response_format": {"type": "json_object"},
         }
+        if reasoning:
+            payload["max_completion_tokens"] = min(self.openai_max_tokens, 4096)
+        else:
+            payload["temperature"] = 0.1 if temperature is None else temperature
+            payload["max_tokens"] = min(self.openai_max_tokens, 2048)
         headers = {"Authorization": f"Bearer {self.openai_key}", "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.openai_base}/chat/completions", json=payload, headers=headers)
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
 
-    async def _ollama_raw(self, prompt: str, system: str) -> str:
-        payload = {"model": self.ollama_model, "prompt": f"{system}\n\n{prompt}" if system else prompt,
-                   "stream": False, "format": "json", "options": {"temperature": 0.1, "num_predict": 1024}}
+    async def _ollama_raw(self, prompt: str, system: str, model: Optional[str] = None,
+                          temperature: Optional[float] = None) -> str:
+        payload = {"model": model or self.ollama_model, "prompt": f"{system}\n\n{prompt}" if system else prompt,
+                   "stream": False, "format": "json",
+                   "options": {"temperature": 0.1 if temperature is None else temperature, "num_predict": 1024}}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.ollama_base}/api/generate", json=payload)
             resp.raise_for_status()

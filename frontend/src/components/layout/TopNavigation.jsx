@@ -7,6 +7,7 @@ const NAV = [
   { to: '/', label: 'Overview', end: true },
   { to: '/dashboard', label: 'Agent dashboard' },
   { to: '/chat', label: 'Diagnostic chat' },
+  { to: '/traces', label: 'Trace explorer' },
 ]
 
 /** Brand mark: a gauge needle in a ring — plain geometry, no stock icon. */

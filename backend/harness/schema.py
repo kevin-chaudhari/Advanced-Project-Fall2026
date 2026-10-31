@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 SourceType = Literal["real", "synthetic"]
 ClaimStatus = Literal["SUPPORTED", "DERIVED", "UNSUPPORTED"]
@@ -113,6 +113,8 @@ class ConfidenceBreakdown(BaseModel):
     confidence: float
     factors: List[ConfidenceFactor]
     formula: str
+    evidence_confidence: Optional[float] = None   # factor formula alone (before the council blend)
+    council_confidence: Optional[float] = None    # agents' agreed confidence from the collaboration
 
 
 class GateCriterion(BaseModel):
@@ -149,7 +151,10 @@ class AuditEvent(BaseModel):
 
 
 MessageKind = Literal["QUESTION", "CHALLENGE", "EVIDENCE_REQUEST", "EVIDENCE_SHARE", "POSITION_UPDATE",
-                      "CONCESSION", "HOLD", "RISK_FLAG", "HUMAN_INPUT_REQUEST", "SYNTHESIS"]
+                      "CONCESSION", "HOLD", "RISK_FLAG", "HUMAN_INPUT_REQUEST", "SYNTHESIS",
+                      # collaborative council + verification exchange (harness/collaboration.py)
+                      "FINDING", "RESPONSE", "COUNTER_ARGUMENT", "UNCERTAINTY_FLAG",
+                      "VERIFICATION_REQUEST", "VERIFICATION_RESULT"]
 
 
 class AgentMessage(BaseModel):
@@ -170,6 +175,7 @@ class AgentMessage(BaseModel):
     in_reply_to: Optional[str] = None
     payload: Dict[str, Any] = Field(default_factory=dict)
     resolved: Optional[bool] = None                          # for QUESTION / CHALLENGE / requests
+    phase: str = "council"                                   # collaboration | resync | verification | uncertainty | council | synthesis
 
 
 class DiagnosticState(BaseModel):
@@ -204,11 +210,21 @@ class DiagnosticState(BaseModel):
     review: Optional[ReviewGateResult] = None
 
     messages: List[AgentMessage] = Field(default_factory=list)   # agent council board
+    round_counter: int = 0                                         # last message round used (all phases share one sequence)
+    collab: Dict[str, Any] = Field(default_factory=dict)           # collaboration state (positions, joint finding)
     council: Dict[str, Any] = Field(default_factory=dict)          # council summary (trigger, rounds, deltas)
 
     final_label: Optional[str] = None
     final_diagnosis: str = ""
     audit_trail: List[AuditEvent] = Field(default_factory=list)
+
+    # AgentTrace recorder for this run (harness/agent_trace). Private: never serialised,
+    # never read by agents; it only observes posts and inbox reads.
+    _trace: Any = PrivateAttr(default=None)
+    # Per-run retrieval options (top_k, excluded record IDs). Kept on the run, not on the shared
+    # orchestrator, so concurrent analyses cannot overwrite each other's settings.
+    _run_opts: Dict[str, Any] = PrivateAttr(default_factory=dict)
+    _phase: str = PrivateAttr(default="council")
 
     # helpers -----------------------------------------------------------------
     def evidence_by_id(self) -> Dict[str, Evidence]:
@@ -217,19 +233,49 @@ class DiagnosticState(BaseModel):
     def derived_by_id(self) -> Dict[str, DerivedValue]:
         return {d.derived_id: d for d in self.derived}
 
+    def next_round(self) -> int:
+        self.round_counter += 1
+        return self.round_counter
+
+    def set_phase(self, phase: str) -> None:
+        self._phase = phase
+
     def post(self, *, round: int, sender: str, kind: str, text: str, recipients: Optional[List[str]] = None,
              topic: str = "", evidence_ids: Optional[List[str]] = None, in_reply_to: Optional[str] = None,
-             payload: Optional[Dict[str, Any]] = None, resolved: Optional[bool] = None) -> AgentMessage:
+             payload: Optional[Dict[str, Any]] = None, resolved: Optional[bool] = None,
+             phase: Optional[str] = None) -> AgentMessage:
         msg = AgentMessage(message_id=f"M-{len(self.messages) + 1:03d}", round=round, sender=sender,
                            recipients=recipients or ["all"], kind=kind, topic=topic, text=text,
                            evidence_ids=list(dict.fromkeys(evidence_ids or [])), in_reply_to=in_reply_to,
-                           payload=payload or {}, resolved=resolved)
+                           payload=payload or {}, resolved=resolved, phase=phase or self._phase)
+        self.round_counter = max(self.round_counter, round)
         self.messages.append(msg)
+        if self._trace is not None:
+            self._trace.on_post(self, msg)
         return msg
 
     def inbox(self, agent: str, round: int) -> List[AgentMessage]:
-        return [m for m in self.messages if m.round == round and m.sender != agent
+        """Messages addressed to ``agent`` in ``round``. Reading the inbox is what the trace
+        records as delivery (MESSAGE_RECEIVED), so agents must read through here."""
+        msgs = [m for m in self.messages if m.round == round and m.sender != agent
                 and (agent in m.recipients or "all" in m.recipients)]
+        if self._trace is not None and msgs:
+            self._trace.on_inbox(agent, msgs)
+        return msgs
+
+    def inbox_all(self, agent: str) -> List[AgentMessage]:
+        """Every message addressed to ``agent`` (all rounds), recorded as delivered."""
+        msgs = [m for m in self.messages if m.sender != agent and (agent in m.recipients or "all" in m.recipients)]
+        if self._trace is not None and msgs:
+            self._trace.on_inbox(agent, msgs)
+        return msgs
+
+    def read_board(self, agent: str) -> List[AgentMessage]:
+        """The whole board, read by ``agent`` (e.g. the coordinator's council synthesis)."""
+        msgs = list(self.messages)
+        if self._trace is not None:
+            self._trace.on_inbox(agent, [m for m in msgs if m.sender != agent], via="board_read")
+        return msgs
 
     def add_derived(self, description: str, value: Optional[float] = None,
                     text: Optional[str] = None, inputs: Optional[List[str]] = None) -> str:

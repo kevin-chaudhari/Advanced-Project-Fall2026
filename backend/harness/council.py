@@ -162,7 +162,7 @@ def mark_resolved(state: DiagnosticState, round_no: int) -> None:
 
 
 def summary(state: DiagnosticState) -> Dict[str, Any]:
-    msgs = state.messages
+    msgs = [m for m in state.messages if m.phase == "council"]  # escalation council only
     open_items = [m for m in msgs if m.kind in ("QUESTION", "CHALLENGE", "HUMAN_INPUT_REQUEST", "EVIDENCE_REQUEST")]
     return {
         "convened": bool(state.council.get("convened")),
@@ -180,6 +180,8 @@ def summary(state: DiagnosticState) -> Dict[str, Any]:
         "human_inputs": state.council.get("human_inputs", []),
         "first_pass_findings": state.council.get("first_pass_findings", {}),
         "mode": COUNCIL_MODE,
+        "collaboration_messages": sum(1 for m in state.messages if m.phase in ("collaboration", "resync")),
+        "total_messages": len(state.messages),
     }
 
 

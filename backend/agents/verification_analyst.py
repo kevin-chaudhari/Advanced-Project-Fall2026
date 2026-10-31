@@ -102,6 +102,11 @@ class VerificationAnalystAgent(BaseAgent):
 
         agree_ratio = len(primary["agents_agreeing"]) / max(len(findings), 1)
         disagreement = len({v for v in findings.values() if v}) > 1
+        # the private drafts are the independent signal: if they disagreed, the evidence is contested even when
+        # the council has since converged, so the evidence check must still go and look for more
+        drafts = state.collab.get("drafts") or {}
+        draft_disagreement = len({v for v in drafts.values() if v}) > 1
+        disagreement = disagreement or draft_disagreement
         agreement_without_evidence = (len(set(findings.values())) == 1 and len(findings) >= 2
                                       and primary["score"] < 0.35)
 
@@ -152,10 +157,88 @@ class VerificationAnalystAgent(BaseAgent):
             pass_number=1 + state.feedback_rounds,
             extras={"verified_label": primary["label"], "alternative": alt["label"] if alt else None,
                     "margin": round(margin, 4), "agreement_ratio": round(agree_ratio, 3),
-                    "agents_disagree": disagreement, "agreement_without_evidence": agreement_without_evidence,
+                    "agents_disagree": disagreement, "draft_disagreement": draft_disagreement,
+                    "agreement_without_evidence": agreement_without_evidence,
                     "unsupported_agent_claims": unsupported, "adversarial_review": qa,
                     "candidate_reviews": [{k: v for k, v in r.items() if k != "hypothesis"} for r in reviews],
                     "irrelevant_records": irrelevant, "first_pass_findings": findings})
+
+    # ── collaborative council: evidence-balance view ────────────────────────
+    COLLAB_OPENNESS = 0.2          # evidence-first: agreement barely moves her
+    COLLAB_CRITIQUE = "CHALLENGE"
+
+    def collab_view(self, state: DiagnosticState, ctx: AgentContext, candidates: List[str]):
+        from harness.collaboration import View
+        scores = {h["label"]: h["score"] for h in state.analysis.get("hypotheses", [])}
+        sup, why, ids = {}, {}, {}
+        for c in candidates:
+            h = build_hypothesis(state, ctx.ref, c, scores.get(c, 0.0))
+            ns, nc = len(h.supporting), len(h.contradicting)
+            sup[c] = scores.get(c, 0.0) * (1 + ns) / (1 + ns + 2 * nc)
+            why[c] = (f"{ns} supporting / {nc} contradicting item(s)"
+                      + (f"; {h.contradicting[0].statement.split(' [')[0].lower()}" if nc else ""))
+            ids[c] = list(dict.fromkeys(h.evidence_ids[:3] + [i for st in h.contradicting[:2] for i in st.evidence_ids]))
+        if not any(sup.values()):
+            return View(support={}, abstain=True, method="evidence balance", abstain_reason="no candidate has evidence support")
+        return View(support=sup, why=why, ids=ids, method="evidence balance (supporting vs contradicting items)")
+
+    # ── exchange stage: answer verification requests claim by claim ─────────
+    def exchange_verify(self, state: DiagnosticState, ctx: AgentContext, round_no: int):
+        """Persona: adversarial reviewer. Reads everything addressed to her in the exchange and answers each
+        VERIFICATION_REQUEST with a deterministic, claim-by-claim check (cited IDs must exist; every value
+        must match the query, a retrieved record or a harness-derived value). Agreement is not checked —
+        evidence is."""
+        rep = state.verification_output
+        if not rep:
+            return []
+        verified = rep.extras.get("verified_label")
+        reviews = {r["label"]: r for r in rep.extras.get("candidate_reviews", [])}
+        validator = ClaimValidator(state, ctx.known_labels)        # check_sentence is side-effect free
+        valid_ids = {e.evidence_id for e in state.evidence} | {d.derived_id for d in state.derived}
+        posted = []
+        for m in state.inbox(self.key, round_no):
+            if m.kind != "VERIFICATION_REQUEST":
+                continue
+            results = []
+            for c in m.payload.get("claims", []):
+                missing = [i for i in c.get("evidence_ids", []) if i not in valid_ids]
+                checks = validator.check_sentence(c.get("statement", ""), f"exchange:{m.sender}")
+                bad = [x.claim for x in checks if x.status == "UNSUPPORTED"]
+                if missing or bad:
+                    status = "UNSUPPORTED"
+                elif not checks and not c.get("evidence_ids"):
+                    status = "UNCHECKABLE"
+                elif checks and all(x.status == "DERIVED" for x in checks):
+                    status = "DERIVED"
+                else:
+                    status = "SUPPORTED"
+                reasons = ([f"cited ID(s) not in this run: {', '.join(missing)}"] if missing else []) + \
+                          [f"no source for '{b}'" for b in bad[:3]]
+                results.append({"claim_id": c["claim_id"], "status": status,
+                                "evidence_ids": [i for i in c.get("evidence_ids", []) if i in valid_ids],
+                                "missing_ids": missing, "reasons": reasons, "checks": len(checks)})
+            label = m.payload.get("label")
+            r = reviews.get(label) if label else None
+            label_status = ("NO_LABEL" if not label else "VERIFIED" if label == verified else
+                            "NOT_BEST_SUPPORTED" if r else "NOT_A_CANDIDATE")
+            n_bad = sum(1 for x in results if x["status"] == "UNSUPPORTED")
+            text = (f"Checked {len(results)} claim(s): "
+                    + ", ".join(f"{k} {sum(1 for x in results if x['status'] == k)}"
+                                for k in ("SUPPORTED", "DERIVED", "UNSUPPORTED", "UNCHECKABLE")
+                                if any(x["status"] == k for x in results))
+                    + (". " + "; ".join(x["reasons"][0] for x in results if x["reasons"])[:300] if n_bad else ".")
+                    + (f" Label {label}: " + {"VERIFIED": "it is the best-supported hypothesis",
+                                               "NOT_BEST_SUPPORTED": f"evidence score {r['score']:.2f} vs {verified} "
+                                                                     f"{reviews.get(verified, {}).get('score', 0):.2f}" if r else "",
+                                               "NOT_A_CANDIDATE": "not among the evidence-backed candidates",
+                                               "NO_LABEL": ""}[label_status] + "." if label else ""))
+            posted.append(state.post(round=round_no, sender=self.key, kind="VERIFICATION_RESULT", recipients=[m.sender],
+                                     topic=m.topic, in_reply_to=m.message_id, text=text,
+                                     evidence_ids=list(dict.fromkeys(i for x in results for i in x["evidence_ids"]))[:10],
+                                     payload={"results": results, "label": label, "label_status": label_status,
+                                              "verified_label": verified}))
+            m.resolved = True
+        return posted
 
     # ── council: challenge, answer contradiction questions ──────────────────
     def deliberate(self, state: DiagnosticState, ctx: AgentContext, round_no: int, tools=None):
@@ -171,7 +254,7 @@ class VerificationAnalystAgent(BaseAgent):
                        "rapid_triage_output": "aggressive_agent"}
         posted = []
         challenged = {m.recipients[0] for m in state.messages if m.kind == "CHALLENGE" and m.sender == self.key
-                      and m.recipients}
+                      and m.recipients and m.phase == "council"}
         for slot, key in slot_to_key.items():
             agent_rep = getattr(state, slot)
             lab = agent_rep.finding_label if agent_rep else None

@@ -85,6 +85,87 @@ class BaseAgent(ABC):
         """
         return []
 
+    # ── collaborative council (see harness/collaboration.py) ────────────────
+    COLLAB_OPENNESS: float = 0.35          # α: how much the persona lets peers' positions move its own view
+    COLLAB_CRITIQUE: str = "COUNTER_ARGUMENT"
+
+    def collab_view(self, state: DiagnosticState, ctx: AgentContext, candidates: List[str]):
+        """This agent's own-method support for every candidate (harness.collaboration.View)."""
+        from harness.collaboration import View
+        return View(support={}, abstain=True, abstain_reason="this agent does not rank candidates")
+
+    def collab_openness(self, state: DiagnosticState) -> float:
+        return self.COLLAB_OPENNESS
+
+    def collab_answer(self, state: DiagnosticState, ctx: AgentContext, a: str, b: str, view) -> Optional[tuple]:
+        """Answer 'what separates a from b?' → (text, evidence_ids, share, payload) or None."""
+        return None
+
+    def collab_finding_text(self, report: AgentReport, new: str, old: Optional[str]) -> str:
+        return f"{new} (agreed in the council; my draft was {old or 'no label'})"
+
+    # ── verification exchange ───────────────────────────────────────────────
+    def own_report(self, state: DiagnosticState) -> Optional[AgentReport]:
+        from harness.collaboration import REPORT_OF
+        return getattr(state, REPORT_OF[self.key], None)
+
+    def request_verification(self, state: DiagnosticState, round_no: int, max_claims: int = 4) -> List[Any]:
+        """Ask the Verification Analyst to check the claims behind this agent's finding."""
+        from harness.agent_trace.trace_manager import claim_id
+        rep = self.own_report(state)
+        if not rep:
+            return []
+        stmts = list(rep.supporting_evidence)
+        lead = next((h for h in rep.hypotheses if h.label == rep.finding_label), None)
+        if lead:
+            stmts += lead.supporting[:2]
+        claims, seen = [], set()
+        for st in stmts:
+            cid = claim_id(self.key, st.statement)
+            if cid in seen:
+                continue
+            seen.add(cid)
+            claims.append({"claim_id": cid, "statement": st.statement, "evidence_ids": list(st.evidence_ids)})
+            if len(claims) >= max_claims:
+                break
+        if not claims:
+            return []
+        ids = list(dict.fromkeys(i for c in claims for i in c["evidence_ids"]))[:10]
+        return [state.post(round=round_no, sender=self.key, kind="VERIFICATION_REQUEST", recipients=["verification"],
+                           topic=rep.finding_label or "claims", evidence_ids=ids,
+                           text=(f"Please verify the {len(claims)} claim(s) behind my finding "
+                                 f"{rep.finding_label or rep.finding}: do the cited IDs exist and do the values match?"),
+                           payload={"label": rep.finding_label, "claims": claims})]
+
+    def acknowledge_verification(self, state: DiagnosticState, ctx: AgentContext, round_no: int) -> List[Any]:
+        """Read the VERIFICATION_RESULT addressed to this agent and qualify the finding when Verification
+        flagged unsupported claims or prefers another label. Message-only: the harness's own
+        strip_unsupported_claims action and the council remain the only things that change reports."""
+        rep = self.own_report(state)
+        posted = []
+        for m in state.inbox(self.key, round_no):
+            if m.kind != "VERIFICATION_RESULT":
+                continue
+            bad = [r for r in m.payload.get("results", []) if r.get("status") == "UNSUPPORTED"]
+            label_status = m.payload.get("label_status")
+            verified = m.payload.get("verified_label")
+            if not bad and label_status in ("VERIFIED", "NO_LABEL"):
+                continue
+            parts = []
+            if bad:
+                parts.append(f"I withdraw {len(bad)} claim(s) Verification could not trace to evidence ("
+                             + "; ".join((r.get("reasons") or ["no source"])[0] for r in bad[:2]) + ")")
+            if label_status in ("NOT_BEST_SUPPORTED", "NOT_A_CANDIDATE") and verified:
+                parts.append(f"{verified} is better supported than my {m.payload.get('label')}; I keep my finding "
+                             f"as a minority view until the council or new evidence settles it")
+            posted.append(state.post(round=round_no, sender=self.key, kind="RESPONSE", recipients=["verification"],
+                                     topic=m.topic, in_reply_to=m.message_id, text=". ".join(parts) + ".",
+                                     evidence_ids=(rep.evidence_ids[:3] if rep else []),
+                                     payload={"label": m.payload.get("label"), "stance": "qualify",
+                                              "withdrawn_claims": [r["claim_id"] for r in bad],
+                                              "verified_label": verified}))
+        return posted
+
     def deterministic(self, state: DiagnosticState, ctx: AgentContext, **kwargs) -> AgentReport:
         raise NotImplementedError(f"{self.__class__.__name__} does not implement the harness API")
 
@@ -159,7 +240,23 @@ class BaseAgent(ABC):
             f"DERIVED_FACTS: {json.dumps(derived)}\n"
             f"DETERMINISTIC_HYPOTHESIS_SCORES: {json.dumps(hyps)}\n"
             f"YOUR_DETERMINISTIC_DRAFT: {json.dumps({'finding': report.finding, 'hypotheses': [h.label for h in report.hypotheses]})}"
+            + self._peer_messages_block(state)
         )
+
+    def _peer_messages_block(self, state: DiagnosticState) -> str:
+        """Messages other agents addressed to this agent, rendered into the prompt.
+
+        Reading them goes through ``state.inbox_all`` so the trace records the
+        delivery; the message IDs in the prompt let the trace confirm they were
+        in the rendered model input. Peer statements are testimony, not evidence.
+        """
+        msgs = state.inbox_all(self.key)[-8:]
+        if not msgs:
+            return ""
+        rows = [{"id": m.message_id, "from": m.sender, "type": m.kind, "text": m.text[:300],
+                 "evidence_ids": m.evidence_ids[:6]} for m in msgs]
+        return ("\nPEER_MESSAGES (other agents' statements addressed to you; they are NOT evidence — cite only "
+                f"EV-/D- IDs): {json.dumps(rows)}")
 
     def _mark_usage(self, state: DiagnosticState, report: AgentReport) -> None:
         ids = set(report.evidence_ids)
