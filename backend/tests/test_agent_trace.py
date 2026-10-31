@@ -425,3 +425,31 @@ def test_tracing_disabled_still_diagnoses(orchestrator, small_kb, monkeypatch):
     monkeypatch.setenv("AGENT_TRACE_ENABLED", "0")
     res = run(orchestrator, small_kb, CLEAR_BEARING)
     assert res["harness"]["trace_id"] is None and res["harness"]["predicted_label"] == "Bearing Wear"
+
+
+# ── export: API downloads and the standalone script produce the same files ──
+def test_trace_export_api_and_script(orchestrator, small_kb, tmp_path):
+    import io
+    import zipfile
+    from fastapi.testclient import TestClient
+    import main
+    tid, _ = trace_of(run(orchestrator, small_kb, MISSING_TEMP))
+    c = TestClient(main.app)
+    full = c.get(f"/traces/{tid}/export", params={"format": "json"})
+    assert full.status_code == 200 and f'filename="{tid}.json"' in full.headers["content-disposition"]
+    b = full.json()
+    assert b["trace"]["trace_id"] == tid and b["messages"] and b["events"] and b["executions"] and b["positions"]
+    md = c.get(f"/traces/{tid}/export", params={"format": "transcript"}).text
+    assert md.startswith(f"# Agent conversation — {tid}") and "## Collaboration, round 1" in md
+    csv_text = c.get(f"/traces/{tid}/export", params={"format": "messages_csv"}).text
+    assert csv_text.splitlines()[0].startswith("seq,message_id") and len(csv_text.splitlines()) > len(b["messages"])
+    assert c.get(f"/traces/{tid}/export", params={"format": "pdf"}).status_code == 422
+    z = zipfile.ZipFile(io.BytesIO(c.get("/traces/export/archive", params={"limit": 2}).content))
+    assert "index.json" in z.namelist() and any(n.endswith(".md") for n in z.namelist())
+    out = subprocess.run([sys.executable, str(BACKEND / "scripts" / "export_traces.py"), "--trace-id", tid,
+                          "--format", "all", "--out", str(tmp_path)], capture_output=True, text=True,
+                         env={**os.environ, "AGENT_TRACE_DB_PATH": db_path()})
+    assert out.returncode == 0, out.stderr
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert len(files) == 6 and f"{tid}.json" in files and f"{tid}.md" in files
+    assert (tmp_path / f"{tid}.md").read_text(encoding="utf-8") == md

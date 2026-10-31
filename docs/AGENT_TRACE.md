@@ -312,7 +312,50 @@ Example message (`GET /traces/{id}/messages`, one item, real — Rapid Triage ch
 
 ---
 
-## 6. Frontend: Trace Explorer
+## 6. Exporting traces to files
+
+Every route produces the same files from the SQLite trace store:
+
+| Format | File | Contents |
+|---|---|---|
+| `json` | `TR-….json` | the complete trace: run record, summary, graph, positions, disagreements, every message with deliveries, timeline, hypothesis states, agent executions (with rendered prompts), evidence flow, every raw event |
+| `transcript` | `TR-….md` | readable conversation log, phase by phase: who said what to whom, positions, evidence, who read it, outcomes |
+| `messages_csv`, `events_csv`, `executions_csv`, `evidence_csv` | `TR-….<name>.csv` | flat tables for Excel / pandas |
+
+**Script (backend can be stopped)**, run from `backend/`:
+
+```bash
+python scripts/export_traces.py --list                          # stored traces
+python scripts/export_traces.py --latest                        # newest → exports/traces/TR-….json + .md
+python scripts/export_traces.py --latest 10 --format all        # 10 newest, every format
+python scripts/export_traces.py --trace-id TR-20261031132237-3853e22c --format json,messages_csv
+python scripts/export_traces.py --analysis-id 4                 # trace of a saved analysis
+python scripts/export_traces.py --all --dataset afrb --out exports/afrb
+python scripts/export_traces.py --latest --api http://localhost:8000   # via the running backend
+python scripts/export_traces.py --latest --no-prompts           # leave out rendered LLM prompts
+```
+
+**API:**
+- `GET /traces/{trace_id}/export?format=json|transcript|messages_csv|events_csv|executions_csv|evidence_csv&include_prompts=true` downloads one file.
+- `GET /traces/export/archive?limit=20&formats=json,transcript` downloads a `.zip` with one folder per trace plus `index.json`.
+
+**Browser:** Trace explorer has **Download this trace** buttons under the question, and **Download recent** (a zip of the 20 newest) above the trace list.
+
+**From your own Python code:**
+
+```python
+from harness.agent_trace.trace_repository import TraceReader
+from harness.agent_trace import trace_export
+
+r = TraceReader()                                   # or TraceReader("path/to/analysis_store.db")
+tid = r.list_traces(limit=1)[0][0]["trace_id"]
+bundle = trace_export.bundle(r, tid)                # dict: everything in the trace
+open(f"{tid}.json", "w", encoding="utf-8").write(trace_export.render(bundle, "json"))
+```
+
+---
+
+## 7. Frontend: Trace Explorer
 
 Open **Trace explorer** in the top bar (`/traces`, or `/traces/{trace_id}`); it opens on your latest diagnosis.
 
@@ -329,7 +372,7 @@ Open **Trace explorer** in the top bar (`/traces`, or `/traces/{trace_id}`); it 
 
 ---
 
-## 7. Configuration
+## 8. Configuration
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -346,7 +389,7 @@ Open **Trace explorer** in the top bar (`/traces`, or `/traces/{trace_id}`); it 
 
 ---
 
-## 8. Running and inspecting
+## 9. Running and inspecting
 
 ```bash
 cd backend && uvicorn main:app --reload        # trace tables are created on startup
@@ -360,7 +403,7 @@ mind, dissent, and the number of GPT-voiced messages.
 ### Tests
 
 ```bash
-cd backend && python -m pytest -q        # 58 tests
+cd backend && python -m pytest -q        # 59 tests
 ```
 
 `tests/test_agent_trace.py` covers:

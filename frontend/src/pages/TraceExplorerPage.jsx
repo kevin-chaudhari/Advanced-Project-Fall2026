@@ -6,7 +6,7 @@ import { ConfidenceIndicator, ReviewDecision } from '../components/primitives'
 import CommunicationGraph from '../components/trace/CommunicationGraph'
 import { AgentDetails, CollaborationPanel, Disagreements, EvidenceFlow, MessageInspector, RawEvents, TraceSummary, TraceTimeline } from '../components/trace/TracePanels'
 import { useDiagnostics, DATASETS } from '../state/DiagnosticsContext'
-import { getTrace, getTraceAgents, getTraceEvidence, getTraceHypotheses, getTraceMessages, getTraceTimeline, listTraces } from '../services/api'
+import { getTrace, getTraceAgents, getTraceEvidence, getTraceHypotheses, getTraceMessages, getTraceTimeline, listTraces, traceArchiveUrl, traceExportUrl } from '../services/api'
 import { fmtMs } from '../lib/traceVocab'
 
 /*
@@ -26,7 +26,8 @@ function TraceList({ traces, total, selected, onSelect, loading, onRefresh, erro
       <div className="flex items-center gap-2 px-4 py-3">
         <h2 className="text-[13px] font-semibold text-ink">Traces</h2>
         <span className="text-[12px] text-muted tabular-nums">{total}</span>
-        <button type="button" onClick={onRefresh} className="btn-ghost ml-auto p-1 rounded-md" aria-label="Refresh traces" title="Refresh">
+        <a href={traceArchiveUrl(20)} download className="ml-auto text-[11.5px] font-medium text-primary-700 underline underline-offset-2 focus-ring rounded" title="The 20 newest traces as a .zip (JSON, conversation, messages CSV)">Download recent</a>
+        <button type="button" onClick={onRefresh} className="btn-ghost p-1 rounded-md" aria-label="Refresh traces" title="Refresh">
           {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
         </button>
       </div>
@@ -133,6 +134,14 @@ export default function TraceExplorerPage() {
                   {fmtMs(t.duration_ms)}. <span className={STATUS_TONE[t.status]}>{STATUS_TEXT[t.status]}</span>
                   {t.error && <span className="text-danger-700">: {t.error}</span>}
                 </p>
+                <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[12px]">
+                  <span className="text-muted">Download this trace:</span>
+                  {[['json', 'Full JSON'], ['transcript', 'Conversation (.md)'], ['messages_csv', 'Messages CSV'], ['events_csv', 'Events CSV'],
+                    ['executions_csv', 'Agent runs CSV'], ['evidence_csv', 'Evidence CSV']].map(([f, l]) => (
+                    <a key={f} href={traceExportUrl(t.trace_id, f)} download
+                      className="rounded-md border border-line bg-surface px-2 py-1 font-medium text-ink hover:bg-well focus-ring">{l}</a>
+                  ))}
+                </div>
               </div>
               <div className="rounded-xl border border-line bg-surface p-4">
                 <div className="flex items-start justify-between gap-3">

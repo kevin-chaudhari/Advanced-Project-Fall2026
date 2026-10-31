@@ -65,3 +65,6 @@ out/
 Thumbs.db
 *.swp
 
+
+# trace exports (backend/scripts/export_traces.py)
+exports/

@@ -39,4 +39,8 @@ export const getTraceAgents = async (id, includePrompts = false) =>
 export const getTraceEvents = async (id, { limit = 500, offset = 0, eventType = null } = {}) =>
   (await api.get(`/traces/${id}/events`, { params: { limit, offset, ...(eventType ? { event_type: eventType } : {}) } })).data
 
+/** Direct download URL for one trace: json | transcript | messages_csv | events_csv | executions_csv | evidence_csv */
+export const traceExportUrl = (id, format = 'json') => `${BASE_URL}/traces/${id}/export?format=${format}`
+export const traceArchiveUrl = (limit = 20) => `${BASE_URL}/traces/export/archive?limit=${limit}&formats=json,transcript,messages_csv`
+
 export default api
