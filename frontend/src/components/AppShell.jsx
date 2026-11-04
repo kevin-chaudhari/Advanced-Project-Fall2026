@@ -16,7 +16,7 @@ function Brand() {
     <div className="flex items-center gap-2 min-w-0">
       <div className="w-8 h-8 shrink-0 rounded-lg bg-primary-600 text-white flex items-center justify-center"><Factory size={16} /></div>
       <div className="min-w-0">
-        <div className="text-[13px] font-semibold leading-tight truncate">Industrial Diagnostic AI</div>
+        <div className="text-[13px] font-semibold leading-tight truncate">Mission Control for Agentic AI</div>
         <div className="text-[11px] text-muted leading-tight">six-agent harness</div>
       </div>
     </div>

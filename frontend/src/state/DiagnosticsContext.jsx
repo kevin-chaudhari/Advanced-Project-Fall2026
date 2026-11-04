@@ -14,11 +14,11 @@ export const DATASETS = [
   { id: 'failure_iq', label: 'FailureSensorIQ', long: 'FailureSensorIQ relevance' },
   { id: 'hydraulic', label: 'Hydraulic rig', long: 'Hydraulic rig diagnosis (real data)' },
 ]
-export const MODES = [
-  { id: 'real', label: 'Real' },
-  { id: 'synthetic', label: 'Synthetic' },
-  { id: 'combined', label: 'Combined' },
-]
+/*
+ * Every question is answered from the real and synthetic records together ("combined").
+ * A dataset that has only one partition (the hydraulic rig is real-only) uses that one.
+ */
+const PREFERRED_MODE = 'combined'
 
 const STORE_KEY = 'ida.runs.v1'
 const PREFS_KEY = 'ida.prefs.v1'
@@ -39,7 +39,6 @@ export function DiagnosticsProvider({ children }) {
   const prefs = read(PREFS_KEY, {})
   const [health, setHealth] = useState(null)
   const [dataset, setDataset] = useState(DATASETS.some((d) => d.id === prefs.dataset) ? prefs.dataset : 'afrb')
-  const [mode, setMode] = useState(prefs.mode || 'combined')
   // runs restored from storage that never finished are marked as interrupted, not left "running"
   const [runs, setRuns] = useState(() => read(STORE_KEY, []).map((r) => (r.result || r.error ? r : { ...r, error: 'Interrupted before the backend replied (page was reloaded).' })))
   const [uploading, setUploading] = useState(false)
@@ -48,7 +47,7 @@ export function DiagnosticsProvider({ children }) {
 
   const refreshHealth = useCallback(() => checkHealth().then(setHealth).catch(() => setHealth({ offline: true })), [])
   useEffect(() => { refreshHealth() }, [refreshHealth])
-  useEffect(() => { write(PREFS_KEY, { dataset, mode }) }, [dataset, mode])
+  useEffect(() => { write(PREFS_KEY, { dataset }) }, [dataset])
 
   // persist finished runs; drop oldest until it fits the storage quota
   useEffect(() => {
@@ -58,7 +57,7 @@ export function DiagnosticsProvider({ children }) {
 
   const modesFor = useCallback((ds) => health?.data_modes?.[ds] || [], [health])
   const modes = modesFor(dataset)
-  const effectiveMode = modes.includes(mode) ? mode : modes[0] || 'real'
+  const effectiveMode = modes.includes(PREFERRED_MODE) ? PREFERRED_MODE : modes[0] || 'real'
   const counts = health?.record_counts?.[dataset] || {}
   const loaded = Object.values(counts).some((n) => n > 0)
   const running = runs.some((r) => !r.result && !r.error)
@@ -100,7 +99,7 @@ export function DiagnosticsProvider({ children }) {
   const lastRun = runs[runs.length - 1] || null
 
   const value = {
-    health, refreshHealth, dataset, setDataset, mode, setMode, modes, modesFor, effectiveMode, counts, loaded,
+    health, refreshHealth, dataset, setDataset, modes, modesFor, effectiveMode, counts, loaded,
     runs, latest, lastRun, running, submit, removeRun, clearRuns, uploadCsv, uploading, notice, setNotice,
   }
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

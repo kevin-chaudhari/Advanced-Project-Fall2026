@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Loader2, Upload, ListPlus, X, CornerDownLeft } from 'lucide-react'
-import { cx } from '../ui'
-import { useDiagnostics, MODES, DATASETS } from '../../state/DiagnosticsContext'
+import { useDiagnostics, DATASETS } from '../../state/DiagnosticsContext'
 import { SAMPLES, SAMPLE_GROUPS } from '../../lib/scenarios'
 
 const PLACEHOLDER = {
@@ -36,13 +35,12 @@ function Scenarios({ dataset, onPick, onClose }) {
   )
 }
 
-/** Multiline question box with dataset mode, examples and (AFRB) CSV upload. */
+/** Multiline question box with examples and (AFRB) CSV upload. Every run uses real + synthetic records combined. */
 export default function ChatInput({ draft, setDraft, onSubmitted }) {
-  const { dataset, modesFor, mode, setMode, effectiveMode, loaded, health, running, submit, uploadCsv, uploading, notice, setNotice } = useDiagnostics()
+  const { dataset, loaded, health, running, submit, uploadCsv, uploading, notice, setNotice } = useDiagnostics()
   const [showExamples, setShowExamples] = useState(false)
   const ta = useRef(null)
   const file = useRef(null)
-  const modes = modesFor(dataset)
   const ds = DATASETS.find((d) => d.id === dataset)
 
   // grow with content up to ~8 lines
@@ -77,19 +75,6 @@ export default function ChatInput({ draft, setDraft, onSubmitted }) {
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send() } }}
           className="block w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[14px] leading-relaxed text-ink placeholder:text-slate-500 outline-none" />
         <div className="flex flex-wrap items-center gap-2 px-2.5 pb-2.5 pt-1">
-          <div role="radiogroup" aria-label="Knowledge base mode" className="inline-flex rounded-lg bg-well p-0.5">
-            {MODES.map((m) => {
-              const ok = modes.includes(m.id)
-              const active = effectiveMode === m.id
-              return (
-                <button key={m.id} type="button" role="radio" aria-checked={active} disabled={!ok} onClick={() => setMode(m.id)}
-                  title={ok ? `${m.label} records` : `${ds?.label} has no ${m.label.toLowerCase()} partition`}
-                  className={cx('rounded-md px-2.5 py-1 text-[12px] font-medium focus-ring', active ? 'bg-surface text-ink border border-line' : 'text-muted border border-transparent', !ok && 'opacity-40 cursor-not-allowed')}>
-                  {m.label}
-                </button>
-              )
-            })}
-          </div>
           <button type="button" onClick={() => setShowExamples((v) => !v)} aria-expanded={showExamples}
             className="btn-ghost px-2 py-1 text-[12px]"><ListPlus size={14} aria-hidden /> Examples</button>
           {dataset === 'afrb' && (

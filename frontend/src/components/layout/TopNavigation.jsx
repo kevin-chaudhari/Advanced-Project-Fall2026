@@ -69,9 +69,9 @@ export default function TopNavigation() {
   return (
     <header className="shrink-0 border-b border-line bg-canvas/95 backdrop-blur-[2px]">
       <div className="flex items-center gap-3 sm:gap-6 px-4 sm:px-6 h-[52px]">
-        <NavLink to="/" className="flex items-center gap-2 min-w-0 focus-ring rounded-md" aria-label="Industrial Diagnostic AI — overview">
+        <NavLink to="/" className="flex items-center gap-2 min-w-0 focus-ring rounded-md" aria-label="Mission Control for Agentic AI — overview">
           <Mark />
-          <span className="text-[14px] font-semibold tracking-[-0.01em] text-ink whitespace-nowrap hidden min-[420px]:inline">Industrial Diagnostic AI</span>
+          <span className="text-[14px] font-semibold tracking-[-0.01em] text-ink whitespace-nowrap hidden min-[420px]:inline">Mission Control<span className="hidden xl:inline"> for Agentic AI</span></span>
         </NavLink>
         <nav className="hidden md:flex items-center gap-5 self-stretch" aria-label="Primary">
           {NAV.map((n) => <NavLink key={n.to} to={n.to} end={n.end} className={link}>{n.label}</NavLink>)}

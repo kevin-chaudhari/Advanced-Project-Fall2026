@@ -1,6 +1,13 @@
-# Industrial Diagnostic AI System
+# Mission Control for Agentic AI
 
-Evidence-grounded industrial fault diagnosis with **six cooperating agents**, a
+**An Observability Framework for Human Oversight of Autonomous Multi-Agent Systems**
+
+Mission Control makes a team of autonomous AI agents observable: every message, every piece of
+evidence an agent actually saw, every model call, every score change and the code version are
+recorded (AgentTrace), explained in the UI, and gated by explicit human-review criteria.
+
+The system under observation is an evidence-grounded industrial fault diagnosis council with
+**six cooperating agents**, a
 deterministic orchestration harness, multi-stage RAG over FAISS, and a clearly
 labelled synthetic dataset for coverage and hallucination testing.
 

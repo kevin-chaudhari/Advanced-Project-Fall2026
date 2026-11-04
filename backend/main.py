@@ -55,8 +55,8 @@ async def lifespan(app: FastAPI):
     logger.info("[STOP] Shutting down …")
 
 
-app = FastAPI(title="Industrial Diagnostic AI System",
-              description="Six-agent diagnostic harness with evidence-grounded, multi-stage RAG",
+app = FastAPI(title="Mission Control for Agentic AI",
+              description="An observability framework for human oversight of autonomous multi-agent systems — six-agent industrial diagnostic council with AgentTrace",
               version="3.0.0", lifespan=lifespan)
 
 origins = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")

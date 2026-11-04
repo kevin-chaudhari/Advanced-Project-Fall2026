@@ -48,7 +48,7 @@ export default function ChatMessage({ message }) {
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between mb-2">
-          <p className="text-xs text-[var(--text-muted)]">Industrial Diagnostic AI</p>
+          <p className="text-xs text-[var(--text-muted)]">Mission Control for Agentic AI</p>
           {hasAnalysis && (
             <button
               onClick={() => navigate('/analysis', { state: { analysis: message.content.analysis_report } })}

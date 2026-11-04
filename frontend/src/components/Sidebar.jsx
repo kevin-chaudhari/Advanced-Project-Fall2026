@@ -216,7 +216,7 @@ export default function Sidebar({
       {/* Footer */}
       <div className="p-4 text-center" style={{ borderTop: '1px solid rgba(91,127,255,0.12)' }}>
         <p className="text-[9px] text-[var(--text-muted)]">
-          Industrial Diagnostic AI v2.0
+          Mission Control for Agentic AI
         </p>
         <p className="text-[9px] mt-0.5" style={{ color: 'rgba(91,127,255,0.5)' }}>
           OpenAI GPT-4o · RAG · FAISS · 6-Agent
