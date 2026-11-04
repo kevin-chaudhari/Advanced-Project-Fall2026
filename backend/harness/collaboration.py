@@ -269,9 +269,15 @@ class Collaboration:
         post, pre = c.get("post_scores"), c.get("pre_scores")
         hyps = self.state.analysis.get("hypotheses", [])
         if post and pre and {h["label"]: h["score"] for h in hyps} == post:
+            from harness.agent_trace.trace_manager import hypothesis_scores, record_score_change
+            before = hypothesis_scores(self.state)
             for h in hyps:
                 h["score"] = pre.get(h["label"], h["score"])
             hyps.sort(key=lambda r: -r["score"])
+            record_score_change(self.state, "council_blend_reverted", before, actor="harness",
+                                phase=self.state._phase, round_no=self.state.round_counter, parameters={
+                                    "reason": "a new collaboration pass starts from the evidence scores",
+                                    "previous_phase": c.get("phase")})
         c["score_delta"] = {}
 
     # step runner ----------------------------------------------------------------
@@ -628,6 +634,13 @@ class Collaboration:
         hyps.sort(key=lambda r: -r["score"])
         st.collab["pre_scores"] = pre
         st.collab["post_scores"] = {h["label"]: h["score"] for h in hyps}
+        from harness.agent_trace.trace_manager import record_score_change
+        record_score_change(st, "council_blend", pre, dict(st.collab["post_scores"]), actor="harness",
+                            phase=st._phase, round_no=st.round_counter, parameters={
+                                "weight": w, "joint": {l: round(v, 6) for l, v in joint.items()},
+                                "candidates": list(cands), "mass_redistributed": round(mass, 6),
+                                "formula": "new = (1−w)·score + w·(mass of candidates)·joint/Σjoint",
+                                "positions": {k: compact(p) for k, p in pos.items()}})
         st.collab["score_delta"] = {l: round(st.collab["post_scores"][l] - pre[l], 4) for l in pre}
         changes = []
         for k in FIRST_PASS:

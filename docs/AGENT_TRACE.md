@@ -172,20 +172,22 @@ backend/services/trace_api.py FastAPI router for /traces/*
 
 ---
 
-## 4. Trace schema (`ida.agenttrace/1.0`)
+## 4. Trace schema (`ida.agenttrace/1.1`)
 
 **Tables** (in the analysis SQLite file):
 
 | Table | Key | Content |
 |---|---|---|
-| `agent_traces` | `trace_id` | run-level record: query, dataset, data mode, LLM provider/model, config, status, timestamps, final label/confidence/review, totals, error, `semantic_json` snapshot |
+| `agent_traces` | `trace_id` | run-level record: query, dataset, data mode, LLM provider/model, config, **code version** (`code_version`, `code_version_json`), status, timestamps, final label/confidence/review, totals, error, `semantic_json` snapshot |
 | `trace_events` | (`trace_id`, `seq`) | **append-only** raw events; `event_id` unique; `UNIQUE(trace_id, dedup_key)` makes repeated observations no-ops |
 | `trace_messages` | (`trace_id`, `message_id`) | every agent message (global ID = `trace_id:M-xxx`) with sender execution, recipients, type, evidence, hypothesis IDs, parent / response-to, challenge and resolution status |
 | `trace_message_deliveries` | (`trace_id`, `message_id`, `receiver`, `via`) | observed reads |
 | `trace_agent_executions` | (`trace_id`, `execution_id`) | one per analyze / deliberate / exchange step: input summary, evidence in input, rendered model input, LLM calls (sha256, sizes, duration), output, finding, confidence, hypotheses, claims, messages sent/read, tool calls, status, error |
-| `trace_evidence` | (`trace_id`, `evidence_id`) | EV records (provenance REAL/SYNTHETIC, dataset, record ID, label, retrieval action/method/round/score) and D values |
+| `trace_evidence` | (`trace_id`, `evidence_id`) | EV records (provenance REAL/SYNTHETIC, dataset, record ID, label, retrieval action/method/round/score, full selection reason) and D values, each with its **full content**: `content_json` (sensors + every metadata field; for D values `value`/`text`/`inputs`), `content_text` and `content_sha256` |
 | `trace_evidence_links` | (`trace_id`, `evidence_id`, `relation`, `subject_id`) | the relations in §3 |
 | `trace_hypothesis_states` | (`trace_id`, `seq`) | PROPOSED / RETAINED / CHALLENGED / QUALIFIED / MODIFIED / REJECTED / UNRESOLVED / FINAL per agent, with the message or execution that caused it |
+| `trace_llm_calls` | (`trace_id`, `execution_id`, `call_index`) | one row per model call: the **complete raw response** (never truncated) with its length and sha256, token usage (`prompt_tokens`, `completion_tokens`, `total_tokens`, full `usage_json` incl. cached / reasoning tokens), `finish_reason`, model requested and model that answered, request parameters (temperature, max tokens, response format — never the headers or key), response metadata (OpenAI `id`, `created`, `system_fingerprint`, `service_tier`, HTTP status, `x-request-id`, processing ms; Ollama timings), error text with the HTTP error body, duration, input sha256 |
+| `trace_score_changes` | (`trace_id`, `seq`) | hypothesis scores (or confidence) **immediately before and after** every operation that changes them, the per-label `delta` (after − before), ranks before/after, top label before/after, max \|Δ\|, the operation's parameters (weights, joint ranking, pair shares, formula), stage, phase, round, actor |
 
 **Message fields:** `message_id`, `global_message_id`, `trace_id`, `round_id`, `seq`, `sender_agent_id`, `receiver_agent_ids`, `message_type`, `timestamp`, `topic`, `message_content`, `related_hypothesis_ids`, `evidence_ids`, `parent_message_id`, `response_to_message_id`, `challenge_status` (OPEN / RESPONDED / HELD / CONCEDED / NOT_APPLICABLE), `resolution_status` (RESOLVED / UNRESOLVED / PENDING / AWAITING_HUMAN / NOT_APPLICABLE), `stage` (the message phase), `sender_execution_id`, `payload` (positions, `voice` = method | llm, `voice_model`, `method_text` when voiced), `deliveries`.
 
@@ -193,7 +195,25 @@ backend/services/trace_api.py FastAPI router for /traces/*
 
 **Message types:** QUESTION, FINDING, EVIDENCE_SHARE, EVIDENCE_REQUEST, CHALLENGE, RESPONSE, COUNTER_ARGUMENT, CONCESSION, HOLD, POSITION_UPDATE, UNCERTAINTY_FLAG, RISK_FLAG, VERIFICATION_REQUEST, VERIFICATION_RESULT, HUMAN_INPUT_REQUEST, SYNTHESIS.
 
-**Event types:** TRACE_STARTED, QUERY_PREPARED, RETRIEVAL_STARTED, EVIDENCE_RETRIEVED, HYPOTHESES_SCORED, EVIDENCE_DELIVERED, AGENT_STARTED, LLM_CALL_COMPLETED, AGENT_OUTPUT_GENERATED, AGENT_FAILED, AGENT_REEXECUTED, TOOL_CALLED, MESSAGE_SENT, MESSAGE_RECEIVED, QUESTION_RAISED, HYPOTHESIS_PROPOSED, HYPOTHESIS_CHALLENGED, HYPOTHESIS_UPDATED, EVIDENCE_REQUESTED, EVIDENCE_VERIFIED, FEEDBACK_LOOP_TRIGGERED, TARGETED_RETRIEVAL_STARTED, COLLABORATION_STARTED, COLLABORATION_ROUND_STARTED, COLLABORATION_ROUND_COMPLETED, JOINT_FINDING_REACHED, VERIFICATION_EXCHANGE_COMPLETED, COUNCIL_CONVENED, COUNCIL_SKIPPED, COUNCIL_ROUND_STARTED, COUNCIL_ROUND_COMPLETED (with `reached_max_rounds`), DISAGREEMENT_RESOLVED, DISAGREEMENT_UNRESOLVED, CLAIM_VALIDATED, CONFIDENCE_RECALCULATED, HUMAN_REVIEW_TRIGGERED, REVIEW_GATE_PASSED, FINAL_SYNTHESIS_GENERATED, TRACE_COMPLETED, TRACE_FAILED.
+**Event types:** SCORES_ADJUSTED (mirrors each `trace_score_changes` row), TRACE_STARTED, QUERY_PREPARED, RETRIEVAL_STARTED, EVIDENCE_RETRIEVED, HYPOTHESES_SCORED, EVIDENCE_DELIVERED, AGENT_STARTED, LLM_CALL_COMPLETED, AGENT_OUTPUT_GENERATED, AGENT_FAILED, AGENT_REEXECUTED, TOOL_CALLED, MESSAGE_SENT, MESSAGE_RECEIVED, QUESTION_RAISED, HYPOTHESIS_PROPOSED, HYPOTHESIS_CHALLENGED, HYPOTHESIS_UPDATED, EVIDENCE_REQUESTED, EVIDENCE_VERIFIED, FEEDBACK_LOOP_TRIGGERED, TARGETED_RETRIEVAL_STARTED, COLLABORATION_STARTED, COLLABORATION_ROUND_STARTED, COLLABORATION_ROUND_COMPLETED, JOINT_FINDING_REACHED, VERIFICATION_EXCHANGE_COMPLETED, COUNCIL_CONVENED, COUNCIL_SKIPPED, COUNCIL_ROUND_STARTED, COUNCIL_ROUND_COMPLETED (with `reached_max_rounds`), DISAGREEMENT_RESOLVED, DISAGREEMENT_UNRESOLVED, CLAIM_VALIDATED, CONFIDENCE_RECALCULATED, HUMAN_REVIEW_TRIGGERED, REVIEW_GATE_PASSED, FINAL_SYNTHESIS_GENERATED, TRACE_COMPLETED, TRACE_FAILED.
+
+### Score changes recorded (`trace_score_changes` / `SCORES_ADJUSTED`)
+
+| Operation | Where | What changes |
+|---|---|---|
+| `initial_scoring` | orchestrator, after the first retrieval | scores created (before = `{}`) |
+| `council_blend` | every collaboration pass (collaboration, re-sync, escalation council) | joint ranking blended into the scores, weight `COLLAB_SCORE_WEIGHT` |
+| `council_blend_reverted` | start of a later pass, when the scores are still the blended ones | previous blend undone |
+| `conflict_rescore` | Diagnostic Expert pass 2 (conflicting hypotheses) | contested pair re-weighted on discriminating channels |
+| `targeted_evidence_rescore` | feedback loop after targeted retrieval | scores recomputed from the enlarged evidence (replaces any blend) |
+| `council_pair_rescore` | escalation council joint pair resolution | contested pair re-weighted from the shares agents posted |
+| `council_confidence_blend` | Ambiguity Detection (`quantity = confidence`) | evidence confidence → `min(evidence, (1−β)·evidence + β·council)` |
+
+Consecutive hypothesis-score rows chain exactly (each `after` equals the next `before`), so no score change goes unrecorded; the tests check this.
+
+### Code version
+
+Every trace stores `code_version` = `<commit7>[-dirty]+src.<sha256 of backend Python source, 12 hex>` (e.g. `72f97d6-dirty+src.f92790b584e3`) and `code_version_json` with the full commit SHA, branch, `git describe`, commit time, whether tracked files had uncommitted changes (and which), the full source hash and file count, trace schema and Python version. The source hash identifies the exact code even for runs on uncommitted edits or without git. `CODE_VERSION=<label>` in the environment (CI, a deployment) replaces the commit prefix. `GET /agenttrace/code-version` shows what the running backend stamps on new traces. Older databases are migrated in place on first use; traces made before schema 1.1 show `code_version: null` and have no LLM-call or score-change rows.
 
 API keys, headers and credentials are never passed to the recorder. Prompts contain only the query, evidence summaries and peer messages. Set `AGENT_TRACE_STORE_PROMPTS=0` to keep only their hash and length.
 
@@ -318,9 +338,11 @@ Every route produces the same files from the SQLite trace store:
 
 | Format | File | Contents |
 |---|---|---|
-| `json` | `TR-….json` | the complete trace: run record, summary, graph, positions, disagreements, every message with deliveries, timeline, hypothesis states, agent executions (with rendered prompts), evidence flow, every raw event |
+| `json` | `TR-….json` | the complete trace: code version, run record, summary (incl. token usage), graph, positions, disagreements, every message with deliveries, timeline, hypothesis states, agent executions (with rendered prompts), every model call with its full raw response and metadata (`llm_calls`), every score change (`score_changes`), evidence flow with full record content, every raw event |
 | `transcript` | `TR-….md` | readable conversation log, phase by phase: who said what to whom, positions, evidence, who read it, outcomes |
-| `messages_csv`, `events_csv`, `executions_csv`, `evidence_csv` | `TR-….<name>.csv` | flat tables for Excel / pandas |
+| `messages_csv`, `events_csv`, `executions_csv`, `evidence_csv` | `TR-….<name>.csv` | flat tables for Excel / pandas (`evidence.csv` includes `content_text` and `content`) |
+| `llm_calls_csv` | `TR-….llm_calls.csv` | one row per model call: tokens, finish reason, response id, full `response_raw` |
+| `scores_csv` | `TR-….scores.csv` | long format, one row per (score change, label): before, after, delta, ranks |
 
 **Script (backend can be stopped)**, run from `backend/`:
 
@@ -336,7 +358,8 @@ python scripts/export_traces.py --latest --no-prompts           # leave out rend
 ```
 
 **API:**
-- `GET /traces/{trace_id}/export?format=json|transcript|messages_csv|events_csv|executions_csv|evidence_csv&include_prompts=true` downloads one file.
+- `GET /traces/{trace_id}/export?format=json|transcript|messages_csv|events_csv|executions_csv|evidence_csv|llm_calls_csv|scores_csv&include_prompts=true` downloads one file (`include_prompts=false` also leaves out raw responses).
+- `GET /traces/{trace_id}/llm-calls?include_responses=true` and `GET /traces/{trace_id}/scores` return the model calls and score changes as JSON.
 - `GET /traces/export/archive?limit=20&formats=json,transcript` downloads a `.zip` with one folder per trace plus `index.json`.
 
 **Browser:** Trace explorer has **Download this trace** buttons under the question, and **Download recent** (a zip of the 20 newest) above the trace list.
@@ -365,8 +388,10 @@ Open **Trace explorer** in the top bar (`/traces`, or `/traces/{trace_id}`); it 
 | Who talked to whom | communication graph: arrow weight = messages, colour = statement / request / answer / dispute / flag, dashed = some addressed messages never read |
 | Message inspector | sender, addressees, who actually read it, the position it states and what it was before, whose positions the agent read and its openness, the wording source (method or GPT, with the method text), evidence, reply chain, resolution, resulting hypothesis states |
 | Timeline | every message in sequence order, grouped by phase and round; GPT-voiced messages are marked |
-| Agents | per agent: executions (including each collaboration step), hypothesis evolution, confidence, rendered prompts |
-| Evidence flow | per EV/D item: origin, who received it, whether it was in a rendered prompt, who cited it, verification |
+| Header | code version (commit, branch, uncommitted changes) and download buttons for every format |
+| Agents | per agent: executions (including each collaboration step), hypothesis evolution, confidence, token usage per execution; **Load model inputs and full responses** shows each rendered prompt and every raw model response with usage, request parameters and response metadata |
+| Score changes | every blend and re-score in order: before, after, Δ per hypothesis, top-label changes, formula |
+| Evidence flow | per EV/D item: origin, who received it, whether it was in a rendered prompt, who cited it, verification; expand a row for the full record text and content |
 | Disagreements | every challenge with its replies and outcome |
 | Raw events | the append-only event log |
 
@@ -385,6 +410,7 @@ Open **Trace explorer** in the top bar (`/traces`, or `/traces/{trace_id}`); it 
 | `AGENT_TRACE_ENABLED` | `1` | `0` turns tracing off |
 | `AGENT_TRACE_DB_PATH` | `ANALYSIS_DB_PATH` | SQLite file for traces (default `./data/analysis_store.db`) |
 | `AGENT_TRACE_STORE_PROMPTS` | `1` | `0` stores only hash and length of rendered prompts |
+| `CODE_VERSION` | unset | label recorded as the code version prefix instead of the git commit |
 | `COUNCIL_MODE`, `COUNCIL_MAX_ROUNDS` | `auto`, `2` | escalation council (unchanged) |
 
 ---

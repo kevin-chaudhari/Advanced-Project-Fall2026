@@ -3,7 +3,7 @@ import { CheckCircle2, CircleDot, Eye, EyeOff, ChevronRight, Loader2 } from 'luc
 import { cx, Cited } from '../ui'
 import { agentColor, AGENT_SHORT } from '../../lib/agentColors'
 import { FAMILY, MSG, familyOf, typeLabel, RESOLUTION, HYP_STATUS, SEGMENT_HINT, fmtMs, fmtClock } from '../../lib/traceVocab'
-import { getTraceAgents, getTraceEvents } from '../../services/api'
+import { getTraceAgents, getTraceEvents, getTraceLlmCalls, getTraceScores } from '../../services/api'
 
 const NAME = { ...AGENT_SHORT, harness: 'Retrieval', all: 'everyone' }
 const name = (k) => NAME[k] || k
@@ -167,18 +167,24 @@ export function MessageInspector({ message, messages, hypotheses, onSelect }) {
 /* ── D. agent execution details ────────────────────────────────────────── */
 export function AgentDetails({ traceId, agents, agentOrder, selectedAgent, onSelectAgent }) {
   const [prompts, setPrompts] = useState(null)
+  const [responses, setResponses] = useState(null)
   const [loadingPrompts, setLoadingPrompts] = useState(false)
   const key = selectedAgent || agentOrder?.[0]
   const a = agents?.[key]
-  useEffect(() => { setPrompts(null) }, [traceId])
+  useEffect(() => { setPrompts(null); setResponses(null) }, [traceId])
   if (!a) return <p className="text-[13px] text-muted">No agent executions recorded.</p>
   const execs = a.execution_records || []
   const llm = execs.some((x) => x.llm_calls?.length)
   const loadPrompts = async () => {
     setLoadingPrompts(true)
-    try { setPrompts((await getTraceAgents(traceId, true)).agents) } finally { setLoadingPrompts(false) }
+    try {
+      const [ag, calls] = await Promise.all([getTraceAgents(traceId, true), getTraceLlmCalls(traceId, true)])
+      setPrompts(ag.agents); setResponses(calls.calls)
+    } finally { setLoadingPrompts(false) }
   }
   const promptOf = (xid) => prompts?.[key]?.execution_records?.find((x) => x.execution_id === xid)?.rendered_input
+  const responsesOf = (xid) => (responses || []).filter((c) => c.execution_id === xid)
+  const tokens = (calls) => calls.reduce((n, c) => n + (c.total_tokens || 0), 0)
   return (
     <div className="grid gap-5 lg:grid-cols-[180px_minmax(0,1fr)]">
       <ul className="flex lg:flex-col gap-1 overflow-x-auto" aria-label="Agents">
@@ -227,7 +233,7 @@ export function AgentDetails({ traceId, agents, agentOrder, selectedAgent, onSel
             <h5 className="text-[12px] font-semibold text-ink">Executions</h5>
             {llm && !prompts && (
               <button type="button" onClick={loadPrompts} disabled={loadingPrompts} className="text-[12px] font-medium text-primary-700 underline underline-offset-2 focus-ring rounded">
-                {loadingPrompts ? 'Loading model inputs…' : 'Load rendered model inputs'}
+                {loadingPrompts ? 'Loading model inputs and responses…' : 'Load model inputs and full responses'}
               </button>
             )}
           </div>
@@ -248,6 +254,12 @@ export function AgentDetails({ traceId, agents, agentOrder, selectedAgent, onSel
                     {x.llm_calls?.length ? `; ${x.llm_calls.length} model call(s), ${x.llm_calls.reduce((n, c) => n + c.input_chars, 0).toLocaleString()} characters rendered` : '; no model call (deterministic)'}
                   </div>
                 )}
+                {x.llm_calls?.length > 0 && x.llm_calls.some((c) => c.total_tokens != null) && (
+                  <p className="text-[11.5px] text-muted tabular-nums">
+                    Tokens: {x.llm_calls.reduce((n, c) => n + (c.prompt_tokens || 0), 0).toLocaleString()} prompt + {x.llm_calls.reduce((n, c) => n + (c.completion_tokens || 0), 0).toLocaleString()} completion
+                    {' '}({tokens(x.llm_calls).toLocaleString()} total){x.llm_calls[0].response_model ? `, ${x.llm_calls[0].response_model}` : ''}
+                  </p>
+                )}
                 {x.output?.finding && <p className="mt-1 text-[12.5px] text-ink"><Cited text={x.output.finding} /></p>}
                 {x.claims?.length > 0 && <p className="text-[11.5px] text-muted">{x.claims.length} claim(s); confidence {x.confidence?.toFixed(2)}</p>}
                 {(x.messages_sent?.length > 0 || x.messages_received?.length > 0) && (
@@ -261,6 +273,17 @@ export function AgentDetails({ traceId, agents, agentOrder, selectedAgent, onSel
                     <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-well p-2 text-[11px] leading-snug">{promptOf(x.execution_id)}</pre>
                   </details>
                 )}
+                {responsesOf(x.execution_id).map((c) => (
+                  <details key={c.call_index} className="mt-1.5">
+                    <summary className="cursor-pointer text-[12px] text-primary-700">
+                      Raw model response {c.call_index}{' '}
+                      <span className="text-muted">({c.response_chars?.toLocaleString() ?? 0} chars, {c.total_tokens ?? '?'} tokens, {c.finish_reason || (c.ok ? 'ok' : 'failed')})</span>
+                    </summary>
+                    {c.error && <p className="mt-1 text-[11.5px] text-danger-700 whitespace-pre-wrap">{c.error}</p>}
+                    {c.response_raw != null && <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-well p-2 text-[11px] leading-snug">{c.response_raw}</pre>}
+                    <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-well/60 p-2 text-[10.5px] leading-snug text-muted">{JSON.stringify({ usage: c.usage, request: c.request, response: c.response_meta }, null, 1)}</pre>
+                  </details>
+                ))}
               </li>
             ))}
           </ol>
@@ -337,6 +360,18 @@ function FlowRow({ e, open, onToggle }) {
         <tr className="border-b border-line bg-well/50">
           <td colSpan={8} className="px-4 py-2 text-[12px]">
             {e.description && <p className="text-muted mb-1">{e.description}</p>}
+            {e.content_text && (
+              <details className="mb-1">
+                <summary className="cursor-pointer text-primary-700">Record text <span className="text-muted">({e.content_text.length.toLocaleString()} chars)</span></summary>
+                <p className="mt-1 text-ink whitespace-pre-wrap">{e.content_text}</p>
+              </details>
+            )}
+            {e.content && (
+              <details className="mb-1">
+                <summary className="cursor-pointer text-primary-700">Full record content</summary>
+                <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-surface p-2 text-[11px] leading-snug">{JSON.stringify(e.content, null, 1)}</pre>
+              </details>
+            )}
             {e.claims.length > 0 && <ul className="space-y-0.5 mb-1">{e.claims.map((c) => <li key={c.claim_id + c.agent}><AgentDot id={c.agent} size={6} /> <span className="text-muted">{c.polarity}:</span> <Cited text={c.statement} /></li>)}</ul>}
             {e.messages.length > 0 && <p className="text-muted">Cited in {e.messages.map((m) => `${m.message_id} (${typeLabel(m.message_type || '').toLowerCase()} from ${name(m.sender)})`).join(', ')}</p>}
             {e.verification.length > 0 && <p className="text-muted">Verification: {e.verification.map((v) => `${v.claim_id} ${typeLabel(v.status).toLowerCase()} (${v.message_id})`).join('; ')}</p>}
@@ -355,9 +390,11 @@ export function TraceSummary({ summary }) {
     ['Agents', s.total_agents], ['Messages', s.total_messages], ['Rounds', s.total_rounds],
     ['Evidence references', s.total_evidence_references], ['Challenges', s.challenges],
     ['Resolved', s.resolved_disagreements], ['Unresolved', s.unresolved_disagreements], ['Events', s.total_events],
+    ...(s.llm_usage?.total_tokens ? [['Model tokens', s.llm_usage.total_tokens.toLocaleString()]] : []),
+    ...(s.score_changes ? [['Score changes', s.score_changes.length]] : []),
   ]
   return (
-    <dl className="grid grid-cols-4 sm:grid-cols-8 gap-x-4 gap-y-3">
+    <dl className="grid grid-cols-4 sm:grid-cols-5 lg:grid-cols-10 gap-x-4 gap-y-3">
       {items.map(([l, v]) => (
         <div key={l} className="min-w-0">
           <dt className="text-[11.5px] text-muted truncate">{l}</dt>
@@ -532,6 +569,79 @@ export function CollaborationPanel({ positions, summary, onSelect }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+
+/* ── G. score changes: before / after every blend and re-score ─────────── */
+const OPERATION = {
+  initial_scoring: ['Initial scoring', 'Hypotheses scored from the retrieved evidence (signature fit + case vote).'],
+  targeted_evidence_rescore: ['Re-scored after targeted retrieval', 'New evidence replaced the scores (including any council blend).'],
+  conflict_rescore: ['Conflict re-score', 'Diagnostic Expert re-weighted the contested pair on the discriminating channels.'],
+  council_blend: ['Council blend', "The agents' joint position was blended into the hypothesis scores."],
+  council_blend_reverted: ['Council blend undone', 'A new collaboration pass restored the evidence scores first.'],
+  council_pair_rescore: ['Council pair re-score', 'The escalation council re-weighted a contested pair from the shares agents posted.'],
+  council_confidence_blend: ['Confidence blend', 'Evidence confidence blended with council confidence, capped by the evidence.'],
+}
+const fmtD = (d) => (d > 0 ? '+' : d < 0 ? '−' : '±') + Math.abs(d).toFixed(4)
+
+export function ScoreChanges({ traceId }) {
+  const [rows, setRows] = useState(null)
+  const [err, setErr] = useState(null)
+  useEffect(() => {
+    let live = true
+    setRows(null); setErr(null)
+    getTraceScores(traceId).then((d) => live && setRows(d.changes)).catch((e) => live && setErr(e.message))
+    return () => { live = false }
+  }, [traceId])
+  if (err) return <p className="text-[13px] text-danger-700">{err}</p>
+  if (!rows) return <p className="text-[13px] text-muted flex items-center gap-2"><Loader2 size={14} className="animate-spin" />Loading score changes…</p>
+  if (!rows.length) return <p className="text-[13px] text-muted">No score changes recorded. Traces made before schema 1.1 do not have them.</p>
+  return (
+    <div className="space-y-3">
+      <p className="text-[12.5px] text-muted">Scores immediately before and after every operation that changed them, in the order they happened. Δ = after − before.</p>
+      {rows.map((c) => {
+        const [title, hint] = OPERATION[c.operation] || [typeLabel(c.operation), '']
+        const labels = [...new Set([...Object.keys(c.after), ...Object.keys(c.before)])].sort((a, b) => (c.after[b] ?? 0) - (c.after[a] ?? 0))
+        const scale = Math.max(...labels.map((l) => Math.abs(c.delta[l] || 0)), 1e-9)
+        return (
+          <details key={c.change_id} className="rounded-lg border border-line bg-surface px-3 py-2" open={c.operation !== 'initial_scoring'}>
+            <summary className="cursor-pointer flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[12.5px]">
+              <span className="mono text-[11px] text-muted">{c.change_id}</span>
+              <span className="font-semibold text-ink">{title}</span>
+              <span className="text-muted">{[c.stage, c.phase && `phase ${c.phase}`, c.round_id != null && `round ${c.round_id}`, c.actor && (c.actor === 'harness' ? 'harness' : name(c.actor))].filter(Boolean).join(' · ')}</span>
+              {c.top_before !== c.top_after && c.top_before && <span className="font-medium text-warning-700">top: {c.top_before} → {c.top_after}</span>}
+              <span className="ml-auto tabular-nums text-muted">max |Δ| {c.max_abs_delta?.toFixed(4)}</span>
+            </summary>
+            {hint && <p className="mt-1 text-[11.5px] text-muted">{hint}{c.parameters?.formula ? ` ${c.parameters.formula}.` : ''}</p>}
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full min-w-[520px] text-[12px] tabular-nums">
+                <thead><tr className="text-left text-[11px] text-muted border-b border-line">
+                  <th className="py-1 pr-3 font-medium">{c.quantity === 'confidence' ? 'Quantity' : 'Hypothesis'}</th>
+                  <th className="pr-3 font-medium text-right">Before</th><th className="pr-3 font-medium text-right">After</th>
+                  <th className="pr-3 font-medium text-right">Δ</th><th className="font-medium w-40" aria-label="change bar" />
+                </tr></thead>
+                <tbody>
+                  {labels.map((l) => {
+                    const d = c.delta[l] || 0
+                    return (
+                      <tr key={l} className="border-b border-line/60">
+                        <td className="py-1 pr-3 text-ink">{l}</td>
+                        <td className="pr-3 text-right text-muted">{c.before[l] != null ? c.before[l].toFixed(4) : '—'}</td>
+                        <td className="pr-3 text-right text-ink">{c.after[l] != null ? c.after[l].toFixed(4) : '—'}</td>
+                        <td className={cx('pr-3 text-right font-medium', d > 0 ? 'text-success-700' : d < 0 ? 'text-danger-700' : 'text-muted')}>{fmtD(d)}</td>
+                        <td><div className="relative h-2 rounded bg-well"><div className={cx('absolute top-0 h-2 rounded', d >= 0 ? 'left-1/2 bg-success-500' : 'right-1/2 bg-danger-500')}
+                          style={{ width: `${(Math.abs(d) / scale) * 50}%` }} /></div></td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )
+      })}
     </div>
   )
 }

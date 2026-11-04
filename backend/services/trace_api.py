@@ -171,6 +171,32 @@ async def trace_evidence(trace_id: str = TRACE_ID):
     return {"trace_id": trace_id, "evidence": evidence_view(r, trace_id)}
 
 
+@router.get("/traces/{trace_id}/llm-calls")
+async def trace_llm_calls(trace_id: str = TRACE_ID, include_responses: bool = Query(default=True,
+                          description="Include the complete raw model responses")):
+    """Every model call: full raw response, token usage, finish reason, response metadata (no headers or keys)."""
+    r = _reader()
+    _require(r, trace_id)
+    calls = r.llm_calls(trace_id, include_responses=include_responses)
+    return {"trace_id": trace_id, "calls": calls, "total": len(calls),
+            "usage": {k: sum(c.get(k) or 0 for c in calls) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}}
+
+
+@router.get("/traces/{trace_id}/scores")
+async def trace_scores(trace_id: str = TRACE_ID):
+    """Hypothesis scores / confidence immediately before and after every blend and re-score, with deltas."""
+    r = _reader()
+    _require(r, trace_id)
+    return {"trace_id": trace_id, "changes": r.score_changes(trace_id)}
+
+
+@router.get("/agenttrace/code-version")
+async def current_code_version():
+    """The code version the running backend stamps on new traces."""
+    from harness.agent_trace.code_version import code_version
+    return code_version()
+
+
 @router.get("/traces/{trace_id}/hypotheses")
 async def trace_hypotheses(trace_id: str = TRACE_ID):
     r = _reader()

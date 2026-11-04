@@ -16,7 +16,9 @@ Examples (run from the backend folder):
   python scripts/export_traces.py --latest --db "C:/path/to/analysis_store.db"
 
 Formats: json (complete bundle), transcript (readable .md conversation),
-messages_csv, events_csv, executions_csv, evidence_csv, or all.
+messages_csv, events_csv, executions_csv, evidence_csv (with full record content),
+llm_calls_csv (full raw responses + token usage), scores_csv (scores before/after
+every blend and re-score), or all.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
-FORMATS = ("json", "transcript", "messages_csv", "events_csv", "executions_csv", "evidence_csv")
+from harness.agent_trace.trace_export import EXT, FORMATS  # noqa: E402  (single source of format names)
 
 
 def _http(api: str, path: str, params=None, raw: bool = False):
@@ -88,7 +90,7 @@ def main() -> int:
         if not rows:
             print("No traces stored yet. Ask a question in the app first.")
         for t in rows:
-            print(f"{t['trace_id']}  {t['started_at'][:19]}  {t['dataset_type']:<10} {t['status']:<22} "
+            print(f"{t['trace_id']}  {t['started_at'][:19]}  {(t.get('code_version') or '-'):<30} {t['dataset_type']:<10} {t['status']:<22} "
                   f"{str(t.get('final_label')):<26} {t.get('total_messages') or 0:>3} msgs  {t['query'][:60]}")
         return 0
     if a.trace_id:
@@ -114,8 +116,7 @@ def main() -> int:
     if not out.is_absolute():
         out = BACKEND / out
     out.mkdir(parents=True, exist_ok=True)
-    ext = {"json": "json", "transcript": "md", "messages_csv": "messages.csv", "events_csv": "events.csv",
-           "executions_csv": "executions.csv", "evidence_csv": "evidence.csv"}
+    ext = EXT
     done = 0
     for tid in ids:
         if a.api:

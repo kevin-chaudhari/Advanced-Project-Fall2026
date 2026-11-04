@@ -100,9 +100,15 @@ class DiagnosticExpertAgent(BaseAgent):
             share_a = fa / (fa + fb)
             new_a = 0.5 * scored[0]["score"] + 0.5 * pair_total * share_a
             new_b = 0.5 * scored[1]["score"] + 0.5 * pair_total * (1 - share_a)
+            from harness.agent_trace.trace_manager import hypothesis_scores, record_score_change
+            before = hypothesis_scores(state)
             rescored = [dict(scored[0], score=round(new_a, 4)), dict(scored[1], score=round(new_b, 4))] + scored[2:]
             rescored.sort(key=lambda r: -r["score"])
             state.analysis["hypotheses"] = rescored
+            record_score_change(state, "conflict_rescore", before, actor=self.key, parameters={
+                "pair": [a, b], "pairwise_share": {a: round(share_a, 4), b: round(1 - share_a, 4)},
+                "rule": "new = 0.5·old + 0.5·(pair total)·share", "pair_total": round(pair_total, 6),
+                "discriminating_sensors": [d["sensor"] for d in disc], "targeted_evidence": targeted[:20]})
             state.analysis["conflict_resolution"] = {"pair": [a, b], "discriminating": disc,
                                                      "pairwise_share": {a: round(share_a, 3), b: round(1 - share_a, 3)}}
             return rescored, notes

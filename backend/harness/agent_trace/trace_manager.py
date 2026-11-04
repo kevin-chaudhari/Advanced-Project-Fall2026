@@ -24,6 +24,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from harness.agent_trace.code_version import code_version
 from harness.agent_trace.trace_repository import TraceReader, TraceWriter, db_path
 from harness.agent_trace.trace_schema import (ASK_KINDS, CHALLENGE_KINDS, EVIDENCE_REF, MESSAGE_REF,
                                               TRACE_SCHEMA_VERSION, EventType, EvidenceRelation, ExecutionStatus,
@@ -116,15 +117,21 @@ class TraceRecorder:
         self.write_errors = 0
         self.failed_executions = 0
         self.finished = False
+        self._score_n = itertools.count(1)
+        try:
+            self.code_version = code_version()
+        except Exception as exc:  # pragma: no cover - never block a run on version detection
+            self.code_version = {"id": "unknown", "error": str(exc)[:200]}
         self.writer.insert_trace({"trace_id": self.trace_id, "run_id": run_id, "schema_version": TRACE_SCHEMA_VERSION,
                                   "query": query, "dataset_type": dataset_type, "data_mode": data_mode,
                                   "llm_mode": llm_mode, "llm_provider": llm_provider, "llm_model": llm_model,
                                   "config": config or {}, "status": TraceStatus.RUNNING.value,
-                                  "started_at": _now()})
+                                  "started_at": _now(), "code_version": self.code_version})
         self.event(EventType.TRACE_STARTED, actor="harness",
                    payload={"query": query, "dataset_type": dataset_type, "data_mode": data_mode.upper(),
                             "llm_mode": llm_mode, "llm_provider": llm_provider, "llm_model": llm_model,
-                            "config": config or {}, "schema_version": TRACE_SCHEMA_VERSION})
+                            "config": config or {}, "schema_version": TRACE_SCHEMA_VERSION,
+                            "code_version": self.code_version})
 
     # ── core ─────────────────────────────────────────────────────────────────
     def next_seq(self) -> int:
@@ -199,12 +206,14 @@ class TraceRecorder:
                 "provenance": e.source_type.upper(), "dataset": e.dataset, "record_id": e.record_id,
                 "label": e.label, "retrieval_action": action, "retrieval_method": e.retrieval_method,
                 "retrieval_round": e.retrieval_round, "retrieval_score": e.retrieval_score,
-                "method_scores": e.method_scores, "description": (e.selection_reason or "")[:300], "first_seq": seq})
+                "method_scores": e.method_scores, "description": e.selection_reason or "", "first_seq": seq,
+                "content": e.content, "content_text": e.content_text or "",
+                "content_sha256": _sha({"content": e.content, "content_text": e.content_text or ""})})
             links.append({"trace_id": self.trace_id, "evidence_id": e.evidence_id,
                           "relation": EvidenceRelation.RETRIEVED.value, "subject_id": f"retrieval:{action}",
                           "value": Observed.TRUE.value, "actor": "harness", "seq": seq,
                           "detail": {"method": e.retrieval_method, "round": round_no, "event_id": parent,
-                                     "selection_reason": (e.selection_reason or "")[:200]}})
+                                     "selection_reason": e.selection_reason or ""}})
             self._evidence.add(e.evidence_id)
         self.writer.insert_links(links)
 
@@ -213,9 +222,12 @@ class TraceRecorder:
         for d in state.derived:
             if d.derived_id in self._evidence:
                 continue
+            content = {"value": d.value, "text": d.text, "inputs": list(d.inputs)}
             self.writer.insert_evidence({"trace_id": self.trace_id, "evidence_id": d.derived_id, "kind": "derived",
-                                         "provenance": "DERIVED", "description": d.description[:300],
-                                         "retrieval_action": "harness_computation", "first_seq": self.next_seq()})
+                                         "provenance": "DERIVED", "description": d.description,
+                                         "retrieval_action": "harness_computation", "first_seq": self.next_seq(),
+                                         "content": content, "content_text": d.text or "",
+                                         "content_sha256": _sha(content)})
             self._evidence.add(d.derived_id)
 
     def known_ids(self) -> Set[str]:
@@ -305,7 +317,7 @@ class TraceRecorder:
             hyps = [{"hypothesis_id": hypothesis_id(h.label), "label": h.label, "score": h.score,
                      "evidence_ids": h.evidence_ids, "supporting": len(h.supporting),
                      "contradicting": len(h.contradicting), "missing": h.missing[:4]} for h in report.hypotheses[:6]]
-            fields.update({"output_json": {"finding": report.finding, "narrative": report.narrative[:1500],
+            fields.update({"output_json": {"finding": report.finding, "narrative": report.narrative,
                                            "recommendation": report.recommendation, "mode": report.mode,
                                            "missing_information": report.missing_information[:6],
                                            "claims_removed": report.claims_removed,
@@ -503,17 +515,31 @@ class TraceRecorder:
     # ── model calls & tools ──────────────────────────────────────────────────
     @_safe
     def on_llm_call(self, exec_id: str, *, provider: str, model: str, system: str, prompt: str,
-                    response: Optional[str], ok: bool, error: Optional[str], duration_ms: float) -> None:
+                    response: Optional[str], ok: bool, error: Optional[str], duration_ms: float,
+                    meta: Optional[Dict[str, Any]] = None) -> None:
         x = self._exec.get(exec_id)
         if not x:
             return
+        meta = meta or {}
         rendered = f"{system}\n\n{prompt}" if system else prompt
         digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-        call = {"index": len(x["llm_calls"]) + 1, "provider": provider, "model": model, "ok": ok,
-                "error": (error or "")[:300] or None, "duration_ms": round(duration_ms, 1),
+        usage = meta.get("usage") or {}
+        call = {"index": len(x["llm_calls"]) + 1, "provider": provider, "model": model,
+                "response_model": meta.get("response_model"), "ok": ok,
+                "error": error or None, "duration_ms": round(duration_ms, 1),
                 "input_sha256": digest, "input_chars": len(rendered),
-                "response_chars": len(response or ""), "response_excerpt": (response or "")[:2000]}
+                "response_chars": len(response or ""),
+                "response_sha256": hashlib.sha256((response or "").encode("utf-8")).hexdigest() if response is not None else None,
+                "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens"),
+                "total_tokens": usage.get("total_tokens"), "finish_reason": meta.get("finish_reason")}
         x["llm_calls"].append(call)
+        self.writer.insert_llm_call({
+            "trace_id": self.trace_id, "execution_id": exec_id, "call_index": call["index"], "seq": self.next_seq(),
+            "agent_id": x["agent"], "provider": provider, "model": model, "response_model": meta.get("response_model"),
+            "ok": ok, "error": error, "duration_ms": call["duration_ms"], "input_sha256": digest,
+            "input_chars": len(rendered), "response_raw": response, "response_chars": call["response_chars"],
+            "response_sha256": call["response_sha256"], "usage": usage, "finish_reason": meta.get("finish_reason"),
+            "request": meta.get("request"), "response_meta": meta.get("response"), "ts": _now()})
         x["rendered"].append(prompt)
         x["systems"].append(system)
         agent = x["agent"]
@@ -536,7 +562,43 @@ class TraceRecorder:
                 self.on_inbox(agent, delivered, via="rendered_prompt")
         self.event(EventType.LLM_CALL_COMPLETED, actor=agent, execution_id=exec_id,
                    evidence_ids=sorted(present_ids & self._evidence),
-                   payload={k: v for k, v in call.items() if k != "response_excerpt"})
+                   payload=dict(call))
+
+    # ── score changes ────────────────────────────────────────────────────────
+    @_safe
+    def score_change(self, operation: str, before: Dict[str, float], after: Dict[str, float], *,
+                     actor: str = "harness", quantity: str = "hypothesis_score", phase: Optional[str] = None,
+                     round_no: Optional[int] = None, parameters: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """Record the scores immediately before and after one operation that changes them.
+
+        ``delta`` = after − before for every label present on either side (a label missing on
+        one side counts as 0 there and is listed in ``added`` / ``removed``)."""
+        labels = list(dict.fromkeys(list(before) + list(after)))
+        delta = {l: round(float(after.get(l, 0.0)) - float(before.get(l, 0.0)), 6) for l in labels}
+        ranked = quantity == "hypothesis_score"
+        top_b = max(before, key=before.get) if (before and ranked) else None
+        top_a = max(after, key=after.get) if (after and ranked) else None
+        rank_b = {l: i + 1 for i, l in enumerate(sorted(before, key=lambda k: -before[k]))}
+        rank_a = {l: i + 1 for i, l in enumerate(sorted(after, key=lambda k: -after[k]))}
+        params = dict(parameters or {})
+        params.update({"rank_before": rank_b, "rank_after": rank_a,
+                       "added": [l for l in after if l not in before], "removed": [l for l in before if l not in after]})
+        cur = _CURRENT.get()
+        exec_id = cur[1] if cur and cur[0] is self else None
+        mad = max((abs(v) for v in delta.values()), default=0.0)
+        change_id = f"SC-{next(self._score_n):03d}"
+        seq = self.next_seq()
+        self.writer.insert_score_change({
+            "trace_id": self.trace_id, "seq": seq, "change_id": change_id, "operation": operation, "actor": actor,
+            "stage": self._stage, "phase": phase, "round_id": round_no, "execution_id": exec_id, "quantity": quantity,
+            "before": dict(before), "after": dict(after), "delta": delta, "top_before": top_b, "top_after": top_a,
+            "max_abs_delta": round(mad, 6), "parameters": params, "ts": _now()})
+        self.event(EventType.SCORES_ADJUSTED, actor=actor, execution_id=exec_id,
+                   payload={"change_id": change_id, "operation": operation, "quantity": quantity, "phase": phase,
+                            "round": round_no, "before": dict(before), "after": dict(after), "delta": delta,
+                            "top_before": top_b, "top_after": top_a, "top_changed": top_b != top_a,
+                            "max_abs_delta": round(mad, 6), "parameters": params})
+        return change_id
 
     @_safe
     def tool_call(self, agent: str, tool: str, args: Dict[str, Any], result: Dict[str, Any]) -> None:
@@ -617,7 +679,7 @@ class TraceRecorder:
         fields: Dict[str, Any] = {"status": status.value, "completed_at": _now(), "updated_at": _now(),
                                   "duration_ms": round((time.perf_counter() - self._t0) * 1000, 1), "error": error}
         if state is not None:
-            fields.update({"final_label": state.final_label, "final_diagnosis": (state.final_diagnosis or "")[:1000],
+            fields.update({"final_label": state.final_label, "final_diagnosis": state.final_diagnosis or "",
                            "final_confidence": state.confidence.confidence if state.confidence else None,
                            "review_decision": state.review.decision if state.review else None,
                            "communication_rounds": len({m.round for m in state.messages}),
@@ -646,6 +708,25 @@ class NullRecorder:
 
     def attach(self, state) -> None:
         state._trace = None
+
+
+def _sha(obj: Any) -> str:
+    import json
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def hypothesis_scores(state) -> Dict[str, float]:
+    """label → score of the harness's current hypothesis ranking."""
+    return {h["label"]: float(h["score"]) for h in (state.analysis.get("hypotheses") or [])}
+
+
+def record_score_change(state, operation: str, before: Dict[str, float], after: Optional[Dict[str, float]] = None,
+                        **kw) -> None:
+    """Record a score change on the state's trace (no-op when untraced). ``after`` defaults to the current scores."""
+    rec = getattr(state, "_trace", None)
+    if rec is None or not getattr(rec, "enabled", False):
+        return
+    rec.score_change(operation, before, hypothesis_scores(state) if after is None else after, **kw)
 
 
 def _resolution(msg) -> str:

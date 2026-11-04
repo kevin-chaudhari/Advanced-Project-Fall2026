@@ -18,9 +18,11 @@ from harness.agent_trace.trace_analyzer import AGENT_NAMES, build_semantic, evid
 from harness.agent_trace.trace_repository import TraceReader
 from harness.agent_trace.trace_schema import TRACE_SCHEMA_VERSION
 
-FORMATS = ("json", "transcript", "messages_csv", "events_csv", "executions_csv", "evidence_csv")
+FORMATS = ("json", "transcript", "messages_csv", "events_csv", "executions_csv", "evidence_csv",
+           "llm_calls_csv", "scores_csv")
 EXT = {"json": "json", "transcript": "md", "messages_csv": "messages.csv", "events_csv": "events.csv",
-       "executions_csv": "executions.csv", "evidence_csv": "evidence.csv"}
+       "executions_csv": "executions.csv", "evidence_csv": "evidence.csv", "llm_calls_csv": "llm_calls.csv",
+       "scores_csv": "scores.csv"}
 MEDIA = {"json": "application/json", "transcript": "text/markdown; charset=utf-8"}
 
 
@@ -32,8 +34,11 @@ def bundle(reader: TraceReader, trace_id: str, include_prompts: bool = True) -> 
     t.pop("semantic", None)
     events, _ = reader.events(trace_id, limit=1_000_000)
     return {
-        "export_format": "ida.agenttrace.export/1.0", "schema_version": TRACE_SCHEMA_VERSION,
+        "export_format": "ida.agenttrace.export/1.1", "schema_version": TRACE_SCHEMA_VERSION,
+        "trace_schema_version": t.get("schema_version"), "code_version": t.get("code_version"),
         "trace": t, **build_semantic(reader, trace_id),
+        "llm_calls": reader.llm_calls(trace_id, include_responses=include_prompts),
+        "score_changes": reader.score_changes(trace_id),
         "messages": reader.messages(trace_id),
         "timeline": full_timeline(reader, trace_id)["segments"],
         "hypothesis_states": reader.hypothesis_states(trace_id),
@@ -58,7 +63,12 @@ def transcript(b: Dict[str, Any]) -> str:
         f"- Final decision: **{t.get('final_label')}**, confidence {t.get('final_confidence')}, {t.get('review_decision')}",
         f"- {s['total_messages']} messages, {s['total_rounds']} rounds, {s['challenges']} challenge(s) "
         f"({s['resolved_disagreements']} resolved, {s['unresolved_disagreements']} open), {s['total_events']} events",
+        f"- Code version: `{(t.get('code_version') or {}).get('id') or 'not recorded (trace predates schema 1.1)'}`",
     ]
+    u = s.get("llm_usage") or {}
+    if s.get("llm_calls"):
+        out.append(f"- Model calls: {s['llm_calls']} ({', '.join(u.get('models') or []) or 'model unknown'}), "
+                   f"{u.get('prompt_tokens', 0):,} prompt + {u.get('completion_tokens', 0):,} completion tokens")
     c = s.get("collaboration") or {}
     if c.get("joint_label"):
         out.append(f"- Council: joint finding {c['joint_label']}, council confidence {c.get('council_confidence')}, "
@@ -86,6 +96,19 @@ def transcript(b: Dict[str, Any]) -> str:
                 extra.append(f"voiced by {m['payload'].get('voice_model')}")
             out.append("")
             out.append("_" + " · ".join(extra) + "_")
+            out.append("")
+    if b.get("score_changes"):
+        out += ["", "## Score changes", "",
+                "Scores immediately before and after every operation that changed them (Δ = after − before).", ""]
+        for c in b["score_changes"]:
+            where = " · ".join(x for x in (c.get("stage"), c.get("phase") and f"phase {c['phase']}",
+                                           c.get("round_id") is not None and f"round {c['round_id']}") if x)
+            out += [f"**{c['change_id']} · {c['operation']}** ({c['quantity']}; {where}; by {_name(c.get('actor') or 'harness')})", "",
+                    "| label | before | after | Δ |", "|---|---:|---:|---:|"]
+            for l in sorted(c["after"] | c["before"], key=lambda k: -c["after"].get(k, 0.0)):
+                out.append(f"| {l} | {c['before'].get(l, 0.0):.4f} | {c['after'].get(l, 0.0):.4f} | {c['delta'].get(l, 0.0):+.4f} |")
+            if c.get("top_before") != c.get("top_after"):
+                out.append(f"\nTop hypothesis changed: {c['top_before']} → {c['top_after']}.")
             out.append("")
     return "\n".join(out) + "\n"
 
@@ -120,9 +143,30 @@ def render(b: Dict[str, Any], fmt: str) -> str:
                            "duration_ms", "finding_label", "confidence", "finding", "evidence_in_input", "llm_calls",
                            "messages_sent", "messages_received", "error"])
     if fmt == "evidence_csv":
-        return _csv(b["evidence_flow"], ["evidence_id", "kind", "provenance", "label", "retrieval_action", "retrieval_method",
-                                         "retrieval_round", "received_by", "rendered_status", "cited_by",
-                                         "verification_status", "description"])
+        return _csv(b["evidence_flow"], ["evidence_id", "kind", "provenance", "dataset", "record_id", "label",
+                                         "retrieval_action", "retrieval_method", "retrieval_round", "retrieval_score",
+                                         "received_by", "rendered_status", "cited_by", "verification_status",
+                                         "description", "content_text", "content", "content_sha256"])
+    if fmt == "llm_calls_csv":
+        rows = [{**c, "x_request_id": (c.get("response_meta") or {}).get("x_request_id"),
+                 "response_id": (c.get("response_meta") or {}).get("id")} for c in b.get("llm_calls", [])]
+        return _csv(rows, ["seq", "execution_id", "agent_id", "call_index", "provider", "model", "response_model", "ok",
+                           "error", "duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "usage",
+                           "finish_reason", "response_id", "x_request_id", "input_sha256", "input_chars",
+                           "response_chars", "response_sha256", "request", "response_meta", "response_raw", "ts"])
+    if fmt == "scores_csv":       # long format: one row per (score change, label)
+        rows = []
+        for c in b.get("score_changes", []):
+            p = c.get("parameters") or {}
+            for l in list(dict.fromkeys(list(c["before"]) + list(c["after"]))):
+                rows.append({"seq": c["seq"], "change_id": c["change_id"], "operation": c["operation"],
+                             "quantity": c["quantity"], "stage": c["stage"], "phase": c["phase"], "round_id": c["round_id"],
+                             "actor": c["actor"], "label": l, "before": c["before"].get(l), "after": c["after"].get(l),
+                             "delta": c["delta"].get(l), "rank_before": (p.get("rank_before") or {}).get(l),
+                             "rank_after": (p.get("rank_after") or {}).get(l), "top_before": c["top_before"],
+                             "top_after": c["top_after"], "ts": c["ts"]})
+        return _csv(rows, ["seq", "change_id", "operation", "quantity", "stage", "phase", "round_id", "actor", "label",
+                           "before", "after", "delta", "rank_before", "rank_after", "top_before", "top_after", "ts"])
     raise ValueError(f"unknown format {fmt!r}; choose from {', '.join(FORMATS)}")
 
 

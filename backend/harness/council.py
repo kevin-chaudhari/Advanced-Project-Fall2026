@@ -122,6 +122,8 @@ def apply_pair_resolution(state: DiagnosticState, a: str, b: str, shares: Dict[s
     by = {h["label"]: h for h in hyps}
     if a not in by or b not in by:
         return None
+    from harness.agent_trace.trace_manager import hypothesis_scores, record_score_change
+    before = hypothesis_scores(state)
     total = by[a]["score"] + by[b]["score"]
     old_a, old_b = by[a]["score"], by[b]["score"]
     w = COUNCIL_RESCORE_WEIGHT
@@ -129,6 +131,10 @@ def apply_pair_resolution(state: DiagnosticState, a: str, b: str, shares: Dict[s
     by[b] = dict(by[b], score=round((1 - w) * old_b + w * total * (1 - joint_a), 4))
     rescored = sorted([by.get(h["label"], h) for h in hyps], key=lambda r: -r["score"])
     state.analysis["hypotheses"] = rescored
+    record_score_change(state, "council_pair_rescore", before, actor="harness", round_no=round_no, parameters={
+        "pair": [a, b], "joint_share": {a: round(joint_a, 4), b: round(1 - joint_a, 4)}, "sources": sorted(usable),
+        "shares": {k: {a: v[a], b: v[b]} for k, v in usable.items()}, "weight": w, "rule": COUNCIL_RESCORE_RULE,
+        "formula": "new = (1−w)·old + w·(pair total)·joint share"})
     done.append(pair_key(a, b))
     did = derived_id(state, f"council:{pair_key(a, b)}:r{round_no}",
                      f"Council joint share for {a} in {a} vs {b} (mean of {', '.join(sorted(usable))})",

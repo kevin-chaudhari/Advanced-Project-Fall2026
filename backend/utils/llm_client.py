@@ -16,7 +16,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -478,36 +478,47 @@ class LLMClient:
         if not self.is_available():
             return None
         t0 = time.perf_counter()
+        meta: Dict[str, Any] = {}
         try:
             if self.provider == "openai":
-                raw = await self._openai_raw(prompt, system, model=model, temperature=temperature)
+                out = await self._openai_raw(prompt, system, model=model, temperature=temperature)
             else:
-                raw = await self._ollama_raw(prompt, system, model=model, temperature=temperature)
+                out = await self._ollama_raw(prompt, system, model=model, temperature=temperature)
+            raw = out[0] if isinstance(out, tuple) else out          # (text, meta) or plain text (test doubles)
+            if isinstance(out, tuple) and len(out) > 1 and isinstance(out[1], dict):
+                meta.update(out[1])
         except Exception as exc:
             logger.warning("LLM call failed (%s) — deterministic fallback.", exc)
-            self._trace_call(prompt, system, None, False, f"{type(exc).__name__}: {exc}", t0, model)
+            err = f"{type(exc).__name__}: {exc}"
+            if isinstance(exc, httpx.HTTPStatusError):
+                meta.setdefault("response", {})["http_status"] = exc.response.status_code
+                err += f" — {exc.response.text}"
+            self._trace_call(prompt, system, None, False, err, t0, model, meta)
             return None
         if not raw:
-            self._trace_call(prompt, system, raw, False, "empty response", t0, model)
+            self._trace_call(prompt, system, raw, False, "empty response", t0, model, meta)
             return None
         parsed = self.extract_json(raw)
-        self._trace_call(prompt, system, raw, bool(parsed), None if parsed else "response was not valid JSON", t0, model)
+        self._trace_call(prompt, system, raw, bool(parsed), None if parsed else "response was not valid JSON", t0,
+                         model, meta)
         return parsed or None
 
     def _trace_call(self, prompt: str, system: str, raw: Optional[str], ok: bool, error: Optional[str], t0: float,
-                    model: Optional[str] = None) -> None:
-        """Report the exact rendered model input to AgentTrace (no keys or headers are passed)."""
+                    model: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> None:
+        """Report the exact rendered model input, the complete raw response, token usage and response
+        metadata to AgentTrace. Request headers (and so the API key) are never passed."""
         try:
             from harness.agent_trace.trace_manager import notify_llm_call
             notify_llm_call(provider=self.provider,
                             model=model or (self.openai_model if self.provider == "openai" else self.ollama_model),
                             system=system or "", prompt=prompt, response=raw, ok=ok, error=error,
-                            duration_ms=(time.perf_counter() - t0) * 1000)
+                            duration_ms=(time.perf_counter() - t0) * 1000, meta=meta or {})
         except Exception as exc:  # tracing must never affect the model call
             logger.debug("trace hook failed: %s", exc)
 
     async def _openai_raw(self, prompt: str, system: str, model: Optional[str] = None,
-                          temperature: Optional[float] = None) -> str:
+                          temperature: Optional[float] = None) -> Tuple[Optional[str], Dict[str, Any]]:
+        """One chat completion → (message text, metadata: request parameters, usage, response info)."""
         m = model or self.openai_model
         reasoning = m.startswith(("o1", "o3", "o4", "gpt-5"))   # reasoning models reject temperature/max_tokens
         payload = {
@@ -521,21 +532,28 @@ class LLMClient:
         else:
             payload["temperature"] = 0.1 if temperature is None else temperature
             payload["max_tokens"] = min(self.openai_max_tokens, 2048)
+        meta: Dict[str, Any] = {"request": {k: v for k, v in payload.items() if k != "messages"}}   # never headers
         headers = {"Authorization": f"Bearer {self.openai_key}", "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.openai_base}/chat/completions", json=payload, headers=headers)
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            data = resp.json()
+            choice = (data.get("choices") or [{}])[0]
+            meta.update(openai_response_meta(data, resp))
+            return (choice.get("message") or {}).get("content"), meta
 
     async def _ollama_raw(self, prompt: str, system: str, model: Optional[str] = None,
-                          temperature: Optional[float] = None) -> str:
+                          temperature: Optional[float] = None) -> Tuple[str, Dict[str, Any]]:
         payload = {"model": model or self.ollama_model, "prompt": f"{system}\n\n{prompt}" if system else prompt,
                    "stream": False, "format": "json",
                    "options": {"temperature": 0.1 if temperature is None else temperature, "num_predict": 1024}}
+        meta: Dict[str, Any] = {"request": {k: v for k, v in payload.items() if k != "prompt"}}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.ollama_base}/api/generate", json=payload)
             resp.raise_for_status()
-            return resp.json().get("response", "").strip()
+            data = resp.json()
+            meta.update(ollama_response_meta(data, resp))
+            return (data.get("response") or "").strip(), meta
 
     def _mock_response(self, prompt: str) -> str:
         """
@@ -589,3 +607,37 @@ class LLMClient:
 
 # Singleton instance
 llm_client = LLMClient()
+
+
+# ── response metadata for AgentTrace (no request headers, no keys) ──────────
+
+def openai_response_meta(data: Dict[str, Any], resp: Any = None) -> Dict[str, Any]:
+    """Token usage and response metadata of one /chat/completions response."""
+    choice = (data.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    info = {k: data.get(k) for k in ("id", "object", "created", "model", "system_fingerprint", "service_tier")
+            if data.get(k) is not None}
+    info.update({"finish_reason": choice.get("finish_reason"), "choice_index": choice.get("index"),
+                 "choices": len(data.get("choices") or []), "refusal": msg.get("refusal"),
+                 "logprobs": choice.get("logprobs")})
+    if resp is not None:
+        info["http_status"] = getattr(resp, "status_code", None)
+        h = getattr(resp, "headers", {}) or {}
+        for name in ("x-request-id", "openai-processing-ms", "openai-version"):
+            if h.get(name) is not None:
+                info[name.replace("-", "_")] = h.get(name)
+    return {"usage": data.get("usage") or {}, "response_model": data.get("model"),
+            "finish_reason": choice.get("finish_reason"), "response": info}
+
+
+def ollama_response_meta(data: Dict[str, Any], resp: Any = None) -> Dict[str, Any]:
+    """Token counts and timings of one Ollama /api/generate response (``context`` token array left out)."""
+    p, c = data.get("prompt_eval_count"), data.get("eval_count")
+    usage = {"prompt_tokens": p, "completion_tokens": c,
+             "total_tokens": (p or 0) + (c or 0) if (p is not None or c is not None) else None}
+    info = {k: data.get(k) for k in ("model", "created_at", "done", "done_reason", "total_duration", "load_duration",
+                                     "prompt_eval_duration", "eval_duration") if data.get(k) is not None}
+    if resp is not None:
+        info["http_status"] = getattr(resp, "status_code", None)
+    return {"usage": {k: v for k, v in usage.items() if v is not None}, "response_model": data.get("model"),
+            "finish_reason": data.get("done_reason"), "response": info}

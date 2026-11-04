@@ -129,6 +129,13 @@ class AmbiguityDetectionAgent(BaseAgent):
             return
         b = conf_weight()
         final = round(min(e, (1 - b) * e + b * c), 3)
+        from harness.agent_trace.trace_manager import record_score_change
+        record_score_change(state, "council_confidence_blend", {"confidence": e}, {"confidence": final},
+                            actor="ambiguity", quantity="confidence", parameters={
+                                "evidence_confidence": e, "council_confidence": c, "beta": b,
+                                "uncapped": round((1 - b) * e + b * c, 6), "capped_by_evidence": final < round((1 - b) * e + b * c, 3),
+                                "formula": "final = min(evidence, (1−β)·evidence + β·council)",
+                                "joint_label": state.collab.get("joint_label")})
         breakdown.council_confidence = c
         breakdown.factors.append(ConfidenceFactor(
             name="council_agreement", value=round(c, 3), weight=b,

@@ -58,7 +58,7 @@ from harness.council import summary as council_summary
 import harness.council as _council_mod
 from harness.statements import derived_id
 from harness.agent_trace import EventType, HypothesisStatus, start_trace
-from harness.agent_trace.trace_manager import current_execution
+from harness.agent_trace.trace_manager import current_execution, hypothesis_scores, record_score_change
 from harness.collaboration import Collaboration, close_disputes, collab_enabled, reapply_position
 from harness.collaboration import summary as collab_summary
 import harness.collaboration as _collab_mod
@@ -214,7 +214,7 @@ class AgentOrchestrator:
                            known_labels=known_labels)
 
         with audit.step("numerical_analysis", "score_hypotheses") as ev:
-            self._analyse(state, ctx)
+            self._analyse(state, ctx, operation="initial_scoring")
             hs = state.analysis.get("hypotheses", [])[:3]
             ev.reason = ", ".join(f"{h['label']} {h['score']:.2f}" for h in hs) or "no hypotheses"
         rec.event(EventType.HYPOTHESES_SCORED, actor="harness",
@@ -282,7 +282,7 @@ class AgentOrchestrator:
             if any(d.action in ("historical_retrieval", "expanded_rerank", "metadata_filtered_retrieval",
                                 "expanded_historical_search") for d in actionable):
                 with audit.step("numerical_analysis", "rescore_with_targeted_evidence", reason="re-run numerical analysis") as ev:
-                    self._analyse(state, ctx)
+                    self._analyse(state, ctx, operation="targeted_evidence_rescore")
                     ev.status = "loop"
             for key in rerun:
                 kwargs = {"conflict": conflict} if key == "diagnostic_expert" and conflict else {}
@@ -643,7 +643,8 @@ class AgentOrchestrator:
         s.setdefault("rounds", []).append({"round": round_no, "action": action, "added": len(added),
                                            "evidence_ids": added, "label_filter": rr.stats.get("label_filter")})
 
-    def _analyse(self, state: DiagnosticState, ctx: AgentContext) -> None:
+    def _analyse(self, state: DiagnosticState, ctx: AgentContext, operation: str = "initial_scoring") -> None:
+        before = hypothesis_scores(state)
         prof = state.profile
         if state.dataset_type == "failure_iq" or not ctx.kb.has_numeric():
             votes = failure_iq_candidates(state.evidence, prof) if state.dataset_type == "failure_iq" else \
@@ -654,6 +655,11 @@ class AgentOrchestrator:
             hyps = score_hypotheses(prof, ctx.ref, state.retrieval_stats.get("historical_support") or {},
                                     [(e.label, e.retrieval_score) for e in state.evidence])
         state.analysis["hypotheses"] = hyps
+        record_score_change(state, operation, before, actor="harness",
+                            parameters={"method": "score_hypotheses (signature fit + case vote, normalised)",
+                                        "evidence_records": len(state.evidence),
+                                        "replaces_previous_scores": bool(before),
+                                        "council_blend_active": bool(state.collab.get("score_delta"))})
         if prof and prof.sensors and ctx.kb.has_numeric():
             state.analysis["sensor_assessment"] = sensor_assessment(prof, ctx.ref)
         for lab in [h["label"] for h in hyps if h["label"] not in ctx.known_labels]:

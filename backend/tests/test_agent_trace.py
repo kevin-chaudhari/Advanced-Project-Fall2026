@@ -451,5 +451,180 @@ def test_trace_export_api_and_script(orchestrator, small_kb, tmp_path):
                          env={**os.environ, "AGENT_TRACE_DB_PATH": db_path()})
     assert out.returncode == 0, out.stderr
     files = sorted(p.name for p in tmp_path.iterdir())
-    assert len(files) == 6 and f"{tid}.json" in files and f"{tid}.md" in files
+    from harness.agent_trace.trace_export import FORMATS
+    assert len(files) == len(FORMATS) and f"{tid}.json" in files and f"{tid}.md" in files
+    assert f"{tid}.llm_calls.csv" in files and f"{tid}.scores.csv" in files
     assert (tmp_path / f"{tid}.md").read_text(encoding="utf-8") == md
+
+
+# ── schema 1.1: full model responses, evidence content, score changes, code version ──
+
+LONG_TAIL = " ".join(f"word{i}" for i in range(900))       # > 2,000 characters: the old excerpt limit
+
+
+def _fake_openai_http(monkeypatch, n=None):
+    """Answer /chat/completions like OpenAI does (usage, id, fingerprint, headers) — exercises the real client code."""
+    import httpx
+    n = n if n is not None else [0]
+
+    async def post(self, url, json=None, headers=None, **kw):
+        n[0] += 1
+        body = json["messages"][-1]["content"]
+        try:
+            txt = {"text": __import__("json").loads(body).get("DRAFT", "ok")}
+        except ValueError:
+            txt = {"narrative": "The cited records EV-001 and EV-002 are consistent. " + LONG_TAIL}
+        content = __import__("json").dumps(txt)
+        data = {"id": f"chatcmpl-{n[0]}", "object": "chat.completion", "created": 1793650000,
+                "model": json["model"] + "-2025-04-14", "system_fingerprint": "fp_test",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 100 + n[0], "completion_tokens": 7, "total_tokens": 107 + n[0],
+                          "prompt_tokens_details": {"cached_tokens": 0}}}
+        return httpx.Response(200, json=data, headers={"x-request-id": f"req_{n[0]}"}, request=httpx.Request("POST", url))
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    monkeypatch.setattr(llm_client, "provider", "openai")
+    monkeypatch.setattr(llm_client, "openai_key", "sk-test-SECRET-should-never-be-stored")
+    monkeypatch.setenv("HARNESS_USE_LLM", "1")
+    return n
+
+
+def test_full_model_responses_with_usage_and_metadata(orchestrator, small_kb, monkeypatch):
+    _fake_openai_http(monkeypatch)
+    tid, r = trace_of(run(orchestrator, small_kb, MISSING_TEMP))
+    calls = r.llm_calls(tid)
+    execs = {x["execution_id"]: x for x in r.executions(tid)}
+    assert calls and len(calls) == sum(len(x["llm_calls"] or []) for x in execs.values())
+    long = [c for c in calls if LONG_TAIL in (c["response_raw"] or "")]
+    assert long, "a response longer than the old 2,000-character excerpt must be stored whole"
+    for c in calls:
+        assert c["ok"] and len(c["response_raw"]) == c["response_chars"]
+        assert c["total_tokens"] == c["prompt_tokens"] + 7 and c["usage"]["prompt_tokens_details"] == {"cached_tokens": 0}
+        assert c["finish_reason"] == "stop" and c["response_model"].endswith("-2025-04-14")
+        assert c["response_meta"]["id"].startswith("chatcmpl-") and c["response_meta"]["x_request_id"].startswith("req_")
+        assert c["response_meta"]["system_fingerprint"] == "fp_test" and "messages" not in (c["request"] or {})
+        assert c["agent_id"] == execs[c["execution_id"]]["agent_id"]
+    s = build_semantic(r, tid)["summary"]["llm_usage"]
+    assert s["total_tokens"] == sum(c["total_tokens"] for c in calls) and s["calls_without_usage"] == 0
+    # nothing secret: the API key / Authorization header appears nowhere in the trace store
+    import sqlite3
+    con = sqlite3.connect(db_path())
+    dump = "\n".join(con.iterdump())
+    con.close()
+    assert "SECRET-should-never-be-stored" not in dump and "Bearer" not in dump
+
+
+def test_failed_model_call_keeps_status_and_error_body(orchestrator, small_kb, monkeypatch):
+    import httpx
+    _fake_openai_http(monkeypatch)
+
+    async def post(self, url, json=None, headers=None, **kw):
+        return httpx.Response(429, json={"error": {"message": "Rate limit reached", "type": "requests"}},
+                              request=httpx.Request("POST", url))
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    tid, r = trace_of(run(orchestrator, small_kb, MISSING_TEMP))
+    calls = r.llm_calls(tid)
+    assert calls and all(not c["ok"] and c["response_raw"] is None for c in calls)
+    assert all("Rate limit reached" in c["error"] and c["response_meta"]["http_status"] == 429 for c in calls)
+
+
+def test_evidence_records_keep_full_content(orchestrator, small_kb):
+    res = run(orchestrator, small_kb, MISSING_TEMP)
+    tid, r = trace_of(res)
+    stored = {e["evidence_id"]: e for e in r.evidence(tid)}
+    live = res["harness"]["evidence"]
+    assert live
+    for e in live:                               # every retrieved record, field for field
+        row = stored[e["evidence_id"]]
+        assert row["content"] == json.loads(json.dumps(e["content"], default=str))
+        assert row["content_text"] == e["content_text"] and row["description"] == e["selection_reason"]
+        assert row["content_sha256"] and row["record_id"] == e["record_id"]
+    derived = [e for e in stored.values() if e["kind"] == "derived"]
+    assert derived and all(set(d["content"]) == {"value", "text", "inputs"} for d in derived)
+    flow = {x["evidence_id"]: x for x in evidence_view(r, tid)}
+    assert flow[live[0]["evidence_id"]]["content"] == stored[live[0]["evidence_id"]]["content"]
+
+
+def _assert_chain(changes, final_scores):
+    hyp = [c for c in changes if c["quantity"] == "hypothesis_score"]
+    assert hyp[0]["operation"] == "initial_scoring" and hyp[0]["before"] == {}
+    for a, b in zip(hyp, hyp[1:]):               # nothing changed the scores without being recorded
+        assert set(a["after"]) == set(b["before"]) and all(abs(a["after"][k] - b["before"][k]) < 1e-9 for k in a["after"])
+    for c in changes:
+        for l in set(c["before"]) | set(c["after"]):
+            assert c["delta"][l] == pytest.approx(c["after"].get(l, 0.0) - c["before"].get(l, 0.0), abs=1e-6)
+        assert c["max_abs_delta"] == pytest.approx(max(abs(v) for v in c["delta"].values()), abs=1e-6)
+    last = hyp[-1]["after"]                      # the run's final ranking (top 8 reported) is the last recorded "after"
+    assert set(final_scores) <= set(last) and all(abs(last[k] - final_scores[k]) < 1e-9 for k in final_scores)
+
+
+def test_score_changes_before_after_every_blend_and_rescore(orchestrator, small_kb):
+    def conflict(res):
+        return any(c["operation"] == "conflict_rescore" for c in TraceReader().score_changes(res["harness"]["trace_id"]))
+    _, res = find_case(orchestrator, small_kb, conflict)
+    tid, r = trace_of(res)
+    changes = r.score_changes(tid)
+    ops = [c["operation"] for c in changes]
+    assert "council_blend" in ops and "conflict_rescore" in ops
+    _assert_chain(changes, {h["label"]: h["score"] for h in res["harness"]["hypothesis_scores"]})
+    blend = next(c for c in changes if c["operation"] == "council_blend")
+    assert blend["phase"] in COLLAB and blend["round_id"] and 0 < blend["parameters"]["weight"] <= 1
+    assert set(blend["parameters"]["joint"]) <= set(blend["after"])
+    cr = next(c for c in changes if c["operation"] == "conflict_rescore")
+    a, b = cr["parameters"]["pair"]
+    assert cr["actor"] == "diagnostic_expert" and {l for l, d in cr["delta"].items() if d} <= {a, b}
+    conf = [c for c in changes if c["quantity"] == "confidence"]
+    assert conf and all(c["after"]["confidence"] <= c["before"]["confidence"] + 1e-9 for c in conf)   # capped by evidence
+    evs = events(r, tid, "SCORES_ADJUSTED")
+    assert [e["payload"]["change_id"] for e in evs] == [c["change_id"] for c in changes]
+    rows = __import__("csv").DictReader(__import__("io").StringIO(
+        __import__("harness.agent_trace.trace_export", fromlist=["x"]).render(
+            __import__("harness.agent_trace.trace_export", fromlist=["x"]).bundle(r, tid), "scores_csv")))
+    rows = list(rows)
+    assert len(rows) == sum(len(set(c["before"]) | set(c["after"])) for c in changes)
+
+
+def test_code_version_stamped_on_every_trace(orchestrator, small_kb, monkeypatch):
+    from harness.agent_trace import code_version as cv
+    tid, r = trace_of(run(orchestrator, small_kb, CLEAR_BEARING))
+    t = r.get_trace(tid)
+    now = cv.code_version()
+    assert t["code_version"] == json.loads(json.dumps(now)) and t["code_version"]["id"] == now["id"]
+    assert now["id"].endswith("+src." + now["source_sha256"][:12]) and now["source_files"] > 10
+    assert r.list_traces(limit=1)[0][0]["code_version"] == now["id"]
+    started = events(r, tid, "TRACE_STARTED")[0]["payload"]
+    assert started["code_version"]["id"] == now["id"]
+    head = subprocess.run(["git", "-C", str(BACKEND.parent), "rev-parse", "HEAD"], capture_output=True, text=True)
+    if head.returncode == 0:
+        assert now["git"]["commit"] == head.stdout.strip() and now["id"].startswith(head.stdout.strip()[:7])
+    if now["git"] and now["git"].get("changed_files"):    # paths are repo-relative and complete
+        assert all((BACKEND.parent / f.split(" -> ")[-1]).exists() or f.startswith('"') for f in now["git"]["changed_files"])
+    assert cv.source_hash() == cv.source_hash()           # deterministic
+    cv.code_version.cache_clear()
+    monkeypatch.setenv("CODE_VERSION", "release-2026.11")
+    try:
+        assert cv.code_version()["id"].startswith("release-2026.11+src.")
+    finally:
+        cv.code_version.cache_clear()
+
+
+def test_old_trace_database_is_migrated(tmp_path):
+    import sqlite3
+    from harness.agent_trace import trace_repository as repo
+    p = tmp_path / "old.db"
+    con = sqlite3.connect(p)
+    con.execute("""CREATE TABLE agent_traces (trace_id TEXT PRIMARY KEY, run_id TEXT, analysis_id INTEGER,
+                   schema_version TEXT NOT NULL, query TEXT NOT NULL, dataset_type TEXT NOT NULL, data_mode TEXT NOT NULL,
+                   llm_mode TEXT, llm_provider TEXT, llm_model TEXT, config_json TEXT, status TEXT NOT NULL,
+                   started_at TEXT NOT NULL, completed_at TEXT, duration_ms REAL, final_label TEXT, final_diagnosis TEXT,
+                   final_confidence REAL, review_decision TEXT, communication_rounds INTEGER, total_messages INTEGER,
+                   total_events INTEGER, total_evidence_refs INTEGER, error TEXT, semantic_json TEXT, updated_at TEXT)""")
+    con.execute("""INSERT INTO agent_traces (trace_id, schema_version, query, dataset_type, data_mode, status, started_at)
+                   VALUES ('TR-20261031120000-00000000', 'ida.agenttrace/1.0', 'q', 'afrb', 'combined', 'COMPLETED', '2026-10-31')""")
+    con.commit()
+    con.close()
+    reader = repo.TraceReader(str(p))
+    t = reader.get_trace("TR-20261031120000-00000000")
+    assert t["code_version"] is None and t["schema_version"] == "ida.agenttrace/1.0"   # old rows stay readable
+    cols = {row[1] for row in sqlite3.connect(p).execute("PRAGMA table_info(trace_evidence)")}
+    assert {"content_json", "content_text", "content_sha256"} <= cols
+    assert reader.llm_calls("TR-20261031120000-00000000") == [] and reader.score_changes("TR-20261031120000-00000000") == []

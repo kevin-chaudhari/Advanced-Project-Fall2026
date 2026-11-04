@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-TRACE_SCHEMA_VERSION = "ida.agenttrace/1.0"
+TRACE_SCHEMA_VERSION = "ida.agenttrace/1.1"   # 1.1: full LLM responses, evidence content, score changes, code version
 
 
 class EventType(str, Enum):
@@ -70,6 +70,7 @@ class EventType(str, Enum):
     DISAGREEMENT_UNRESOLVED = "DISAGREEMENT_UNRESOLVED"
     CLAIM_VALIDATED = "CLAIM_VALIDATED"
     CONFIDENCE_RECALCULATED = "CONFIDENCE_RECALCULATED"
+    SCORES_ADJUSTED = "SCORES_ADJUSTED"
     HUMAN_REVIEW_TRIGGERED = "HUMAN_REVIEW_TRIGGERED"
     REVIEW_GATE_PASSED = "REVIEW_GATE_PASSED"
     FINAL_SYNTHESIS_GENERATED = "FINAL_SYNTHESIS_GENERATED"
@@ -231,6 +232,7 @@ class TraceListItem(BaseModel):
     communication_rounds: Optional[int] = None
     total_messages: Optional[int] = None
     llm_mode: Optional[str] = None
+    code_version: Optional[str] = None
 
 
 class TraceListResponse(BaseModel):

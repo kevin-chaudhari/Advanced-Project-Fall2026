@@ -4,7 +4,7 @@ import { Loader2, RefreshCw, AlertTriangle } from 'lucide-react'
 import { cx } from '../components/ui'
 import { ConfidenceIndicator, ReviewDecision } from '../components/primitives'
 import CommunicationGraph from '../components/trace/CommunicationGraph'
-import { AgentDetails, CollaborationPanel, Disagreements, EvidenceFlow, MessageInspector, RawEvents, TraceSummary, TraceTimeline } from '../components/trace/TracePanels'
+import { AgentDetails, CollaborationPanel, Disagreements, EvidenceFlow, MessageInspector, RawEvents, ScoreChanges, TraceSummary, TraceTimeline } from '../components/trace/TracePanels'
 import { useDiagnostics, DATASETS } from '../state/DiagnosticsContext'
 import { getTrace, getTraceAgents, getTraceEvidence, getTraceHypotheses, getTraceMessages, getTraceTimeline, listTraces, traceArchiveUrl, traceExportUrl } from '../services/api'
 import { fmtMs } from '../lib/traceVocab'
@@ -17,7 +17,7 @@ import { fmtMs } from '../lib/traceVocab'
 
 const STATUS_TONE = { COMPLETED: 'text-success-700', COMPLETED_WITH_ERRORS: 'text-warning-700', FAILED: 'text-danger-700', RUNNING: 'text-muted' }
 const STATUS_TEXT = { COMPLETED: 'Completed', COMPLETED_WITH_ERRORS: 'Completed, an agent failed', FAILED: 'Failed', RUNNING: 'Incomplete' }
-const TABS = [['collaboration', 'How they agreed'], ['timeline', 'Timeline'], ['agents', 'Agents'], ['evidence', 'Evidence flow'], ['disagreements', 'Disagreements'], ['events', 'Raw events']]
+const TABS = [['collaboration', 'How they agreed'], ['timeline', 'Timeline'], ['agents', 'Agents'], ['evidence', 'Evidence flow'], ['scores', 'Score changes'], ['disagreements', 'Disagreements'], ['events', 'Raw events']]
 
 function TraceList({ traces, total, selected, onSelect, loading, onRefresh, error }) {
   const ds = (id) => DATASETS.find((d) => d.id === id)?.label || id
@@ -134,10 +134,19 @@ export default function TraceExplorerPage() {
                   {fmtMs(t.duration_ms)}. <span className={STATUS_TONE[t.status]}>{STATUS_TEXT[t.status]}</span>
                   {t.error && <span className="text-danger-700">: {t.error}</span>}
                 </p>
+                <p className="mt-1 text-[11.5px] text-muted">
+                  Code version:{' '}
+                  {t.code_version
+                    ? <span className="mono text-ink" title={JSON.stringify(t.code_version, null, 1)}>{t.code_version.id}</span>
+                    : <span>not recorded (trace made before schema 1.1)</span>}
+                  {t.code_version?.git?.branch && <span>, branch {t.code_version.git.branch}</span>}
+                  {t.code_version?.git?.dirty && <span className="text-warning-700">, uncommitted changes ({t.code_version.git.changed_files_count} file{t.code_version.git.changed_files_count === 1 ? '' : 's'})</span>}
+                </p>
                 <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[12px]">
                   <span className="text-muted">Download this trace:</span>
                   {[['json', 'Full JSON'], ['transcript', 'Conversation (.md)'], ['messages_csv', 'Messages CSV'], ['events_csv', 'Events CSV'],
-                    ['executions_csv', 'Agent runs CSV'], ['evidence_csv', 'Evidence CSV']].map(([f, l]) => (
+                    ['executions_csv', 'Agent runs CSV'], ['evidence_csv', 'Evidence CSV'], ['llm_calls_csv', 'Model calls CSV'],
+                    ['scores_csv', 'Score changes CSV']].map(([f, l]) => (
                     <a key={f} href={traceExportUrl(t.trace_id, f)} download
                       className="rounded-md border border-line bg-surface px-2 py-1 font-medium text-ink hover:bg-well focus-ring">{l}</a>
                   ))}
@@ -189,6 +198,7 @@ export default function TraceExplorerPage() {
                 {tab === 'agents' && <AgentDetails traceId={t.trace_id} agents={data.agentDetails.agents} agentOrder={data.agentDetails.agent_order}
                   selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent} />}
                 {tab === 'evidence' && <EvidenceFlow evidence={data.evidence} />}
+                {tab === 'scores' && <ScoreChanges traceId={t.trace_id} />}
                 {tab === 'disagreements' && <Disagreements items={data.disagreements} onSelect={selectMessage} />}
                 {tab === 'events' && <RawEvents traceId={t.trace_id} />}
               </div>

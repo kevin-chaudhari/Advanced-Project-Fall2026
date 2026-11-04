@@ -83,7 +83,29 @@ _DDL = [
         agent_id TEXT NOT NULL, status TEXT NOT NULL, execution_id TEXT, message_id TEXT, round_id INTEGER,
         score REAL, evidence_ids_json TEXT, reason TEXT, ts TEXT NOT NULL,
         PRIMARY KEY (trace_id, seq))""",
+    # full model responses: one row per model call, never truncated
+    """CREATE TABLE IF NOT EXISTS trace_llm_calls (
+        trace_id TEXT NOT NULL, execution_id TEXT NOT NULL, call_index INTEGER NOT NULL, seq INTEGER NOT NULL,
+        agent_id TEXT, provider TEXT, model TEXT, response_model TEXT, ok INTEGER, error TEXT, duration_ms REAL,
+        input_sha256 TEXT, input_chars INTEGER, response_raw TEXT, response_chars INTEGER, response_sha256 TEXT,
+        prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER, usage_json TEXT,
+        finish_reason TEXT, request_json TEXT, response_meta_json TEXT, ts TEXT NOT NULL,
+        PRIMARY KEY (trace_id, execution_id, call_index))""",
+    "CREATE INDEX IF NOT EXISTS idx_tlc_seq ON trace_llm_calls(trace_id, seq)",
+    # hypothesis scores immediately before / after every operation that changes them
+    """CREATE TABLE IF NOT EXISTS trace_score_changes (
+        trace_id TEXT NOT NULL, seq INTEGER NOT NULL, change_id TEXT NOT NULL, operation TEXT NOT NULL,
+        actor TEXT, stage TEXT, phase TEXT, round_id INTEGER, execution_id TEXT, quantity TEXT NOT NULL,
+        before_json TEXT NOT NULL, after_json TEXT NOT NULL, delta_json TEXT NOT NULL,
+        top_before TEXT, top_after TEXT, max_abs_delta REAL, parameters_json TEXT, ts TEXT NOT NULL,
+        PRIMARY KEY (trace_id, seq))""",
 ]
+
+# Columns added after the first release; ``connect`` adds any that an older database lacks.
+_MIGRATIONS = {
+    "agent_traces": [("code_version", "TEXT"), ("code_version_json", "TEXT")],
+    "trace_evidence": [("content_json", "TEXT"), ("content_text", "TEXT"), ("content_sha256", "TEXT")],
+}
 
 
 def db_path() -> str:
@@ -121,6 +143,11 @@ def connect(path: Optional[str] = None) -> sqlite3.Connection:
         if path not in _initialised:
             for stmt in _DDL:
                 con.execute(stmt)
+            for table, cols in _MIGRATIONS.items():
+                have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+                for col, typ in cols:
+                    if col not in have:
+                        con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
             con.commit()
             _initialised.add(path)
     return con
@@ -154,12 +181,15 @@ class TraceWriter:
 
     # ── trace row ────────────────────────────────────────────────────────────
     def insert_trace(self, row: Dict[str, Any]) -> None:
+        cv = row.get("code_version") or {}
         self._exec("""INSERT INTO agent_traces (trace_id, run_id, analysis_id, schema_version, query, dataset_type,
-                      data_mode, llm_mode, llm_provider, llm_model, config_json, status, started_at, updated_at)
-                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      data_mode, llm_mode, llm_provider, llm_model, config_json, status, started_at, updated_at,
+                      code_version, code_version_json)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                    (row["trace_id"], row.get("run_id"), row.get("analysis_id"), row["schema_version"], row["query"],
                     row["dataset_type"], row["data_mode"], row.get("llm_mode"), row.get("llm_provider"),
-                    row.get("llm_model"), _j(row.get("config")), row["status"], row["started_at"], row["started_at"]))
+                    row.get("llm_model"), _j(row.get("config")), row["status"], row["started_at"], row["started_at"],
+                    cv.get("id"), _j(cv) if cv else None))
 
     def update_trace(self, trace_id: str, fields: Dict[str, Any]) -> None:
         cols = {k: (_j(v) if k.endswith("_json") and not isinstance(v, str) else v) for k, v in fields.items()}
@@ -230,12 +260,36 @@ class TraceWriter:
     def insert_evidence(self, ev: Dict[str, Any]) -> bool:
         n = self._exec("""INSERT OR IGNORE INTO trace_evidence (trace_id, evidence_id, kind, provenance, dataset,
                           record_id, label, retrieval_action, retrieval_method, retrieval_round, retrieval_score,
-                          method_scores_json, description, first_seq) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                          method_scores_json, description, first_seq, content_json, content_text, content_sha256)
+                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                        (ev["trace_id"], ev["evidence_id"], ev["kind"], ev.get("provenance"), ev.get("dataset"),
                         ev.get("record_id"), ev.get("label"), ev.get("retrieval_action"), ev.get("retrieval_method"),
                         ev.get("retrieval_round"), ev.get("retrieval_score"), _j(ev.get("method_scores")),
-                        ev.get("description"), ev["first_seq"]))
+                        ev.get("description"), ev["first_seq"], _j(ev.get("content")), ev.get("content_text"),
+                        ev.get("content_sha256")))
         return n > 0
+
+    def insert_llm_call(self, c: Dict[str, Any]) -> None:
+        u = c.get("usage") or {}
+        self._exec("""INSERT OR REPLACE INTO trace_llm_calls (trace_id, execution_id, call_index, seq, agent_id, provider,
+                      model, response_model, ok, error, duration_ms, input_sha256, input_chars, response_raw,
+                      response_chars, response_sha256, prompt_tokens, completion_tokens, total_tokens, usage_json,
+                      finish_reason, request_json, response_meta_json, ts)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (c["trace_id"], c["execution_id"], c["call_index"], c["seq"], c.get("agent_id"), c.get("provider"),
+                    c.get("model"), c.get("response_model"), int(bool(c.get("ok"))), c.get("error"), c.get("duration_ms"),
+                    c.get("input_sha256"), c.get("input_chars"), c.get("response_raw"), c.get("response_chars"),
+                    c.get("response_sha256"), u.get("prompt_tokens"), u.get("completion_tokens"), u.get("total_tokens"),
+                    _j(u) if u else None, c.get("finish_reason"), _j(c.get("request")), _j(c.get("response_meta")), c["ts"]))
+
+    def insert_score_change(self, r: Dict[str, Any]) -> None:
+        self._exec("""INSERT OR IGNORE INTO trace_score_changes (trace_id, seq, change_id, operation, actor, stage, phase,
+                      round_id, execution_id, quantity, before_json, after_json, delta_json, top_before, top_after,
+                      max_abs_delta, parameters_json, ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (r["trace_id"], r["seq"], r["change_id"], r["operation"], r.get("actor"), r.get("stage"), r.get("phase"),
+                    r.get("round_id"), r.get("execution_id"), r["quantity"], _j(r["before"]), _j(r["after"]),
+                    _j(r["delta"]), r.get("top_before"), r.get("top_after"), r.get("max_abs_delta"),
+                    _j(r.get("parameters")), r["ts"]))
 
     def insert_links(self, rows: Iterable[Dict[str, Any]]) -> int:
         rows = list(rows)
@@ -284,7 +338,7 @@ class TraceReader:
         total = self._q(f"SELECT COUNT(*) AS n FROM agent_traces {w}", tuple(params))[0]["n"]
         rows = self._q(f"""SELECT trace_id, run_id, analysis_id, query, dataset_type, data_mode, status, started_at,
                            completed_at, duration_ms, final_label, final_confidence, review_decision,
-                           communication_rounds, total_messages, llm_mode FROM agent_traces {w}
+                           communication_rounds, total_messages, llm_mode, code_version FROM agent_traces {w}
                            ORDER BY started_at DESC, rowid DESC LIMIT ? OFFSET ?""", (*params, limit, offset))
         return [dict(r) for r in rows], int(total)
 
@@ -294,6 +348,8 @@ class TraceReader:
             return None
         d = dict(rows[0])
         d["config"] = _l(d.pop("config_json"), {})
+        d["code_version"] = _l(d.pop("code_version_json", None), None) or (
+            {"id": d["code_version"]} if d.get("code_version") else None)
         d["semantic"] = _l(d.pop("semantic_json"), None)
         return d
 
@@ -368,6 +424,28 @@ class TraceReader:
         for r in self._q("SELECT * FROM trace_evidence WHERE trace_id=? ORDER BY first_seq", (trace_id,)):
             d = dict(r)
             d["method_scores"] = _l(d.pop("method_scores_json"), {})
+            d["content"] = _l(d.pop("content_json", None), None)
+            out.append(d)
+        return out
+
+    def llm_calls(self, trace_id: str, include_responses: bool = True) -> List[Dict[str, Any]]:
+        out = []
+        for r in self._q("SELECT * FROM trace_llm_calls WHERE trace_id=? ORDER BY seq", (trace_id,)):
+            d = dict(r)
+            d["ok"] = bool(d["ok"])
+            for k in ("usage_json", "request_json", "response_meta_json"):
+                d[k[:-5]] = _l(d.pop(k), None)
+            if not include_responses and d.get("response_raw") is not None:
+                d["response_raw"] = f"<{d['response_chars']} chars>"
+            out.append(d)
+        return out
+
+    def score_changes(self, trace_id: str) -> List[Dict[str, Any]]:
+        out = []
+        for r in self._q("SELECT * FROM trace_score_changes WHERE trace_id=? ORDER BY seq", (trace_id,)):
+            d = dict(r)
+            for k in ("before_json", "after_json", "delta_json", "parameters_json"):
+                d[k[:-5]] = _l(d.pop(k), None)
             out.append(d)
         return out
 

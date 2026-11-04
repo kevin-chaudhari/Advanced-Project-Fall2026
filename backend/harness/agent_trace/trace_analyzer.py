@@ -201,7 +201,8 @@ def evidence_flow(evidence: List[Dict[str, Any]], links: List[Dict[str, Any]],
                           ("TRUE" if rendered_true else "FALSE"))
         out.append({**{k: ev.get(k) for k in ("evidence_id", "kind", "provenance", "dataset", "record_id", "label",
                                               "retrieval_action", "retrieval_method", "retrieval_round",
-                                              "retrieval_score", "description")},
+                                              "retrieval_score", "description", "content", "content_text",
+                                              "content_sha256")},
                     "received_by": received, "in_rendered_input": rendered_true, "not_in_rendered_input": rendered_false,
                     "rendered_status": rendered_state, "cited_by": cited, "claims": claims[:12], "messages": msgs[:12],
                     "verification": ver[:12], "verification_status": vstatus})
@@ -243,6 +244,8 @@ def build_semantic(reader: TraceReader, trace_id: str) -> Dict[str, Any]:
     evidence = reader.evidence(trace_id)
     links = reader.evidence_links(trace_id)
     hyps = reader.hypothesis_states(trace_id)
+    calls = reader.llm_calls(trace_id, include_responses=False)
+    score_changes = reader.score_changes(trace_id)
     dis = disagreements(messages)
     graph = communication_graph(messages)
     conf_prog = [{"seq": e["seq"], "confidence": e["payload"].get("confidence"), "stage": e["payload"].get("stage"),
@@ -279,6 +282,18 @@ def build_semantic(reader: TraceReader, trace_id: str) -> Dict[str, Any]:
                                           for x in m["payload"].get("results", []) if x.get("status") == "UNSUPPORTED"),
         "hypothesis_changes": sum(1 for h in hyps if h["status"] in ("MODIFIED", "REJECTED")),
         "llm_calls": sum(len(x.get("llm_calls") or []) for x in executions),
+        "llm_usage": {"calls_with_full_response": sum(1 for c in calls if c.get("response_chars") is not None),
+                      "failed_calls": sum(1 for c in calls if not c["ok"]),
+                      "prompt_tokens": sum(c.get("prompt_tokens") or 0 for c in calls),
+                      "completion_tokens": sum(c.get("completion_tokens") or 0 for c in calls),
+                      "total_tokens": sum(c.get("total_tokens") or 0 for c in calls),
+                      "calls_without_usage": sum(1 for c in calls if c.get("total_tokens") is None),
+                      "models": sorted({c.get("response_model") or c.get("model") for c in calls if c.get("model")})},
+        "score_changes": [{"change_id": s["change_id"], "seq": s["seq"], "operation": s["operation"],
+                           "quantity": s["quantity"], "stage": s["stage"], "phase": s["phase"], "round": s["round_id"],
+                           "top_before": s["top_before"], "top_after": s["top_after"],
+                           "max_abs_delta": s["max_abs_delta"]} for s in score_changes],
+        "code_version": (trace.get("code_version") or {}).get("id"),
         "final_decision": {"label": trace.get("final_label"), "diagnosis": trace.get("final_diagnosis"),
                            "confidence": trace.get("final_confidence"), "review_decision": trace.get("review_decision")},
         "confidence_progression": conf_prog,
