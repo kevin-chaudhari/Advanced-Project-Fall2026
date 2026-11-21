@@ -128,10 +128,13 @@ class Runtime:
         modes = kb.available_modes()
         if data_mode not in modes:
             data_mode = modes[0] if modes else "real"
-        return await self.orchestrator.run_harness(question=question, dataset_type=dataset_type,
-                                                   data_mode=data_mode, kb=kb, embedder=self.embedder,
-                                                   store=self.store, top_k=top_k,
-                                                   exclude_record_ids=list(exclude_record_ids))
+        result = await self.orchestrator.run_harness(question=question, dataset_type=dataset_type,
+                                                     data_mode=data_mode, kb=kb, embedder=self.embedder,
+                                                     store=self.store, top_k=top_k,
+                                                     exclude_record_ids=list(exclude_record_ids))
+        from services.trace_insights import store_snapshot   # step breakdown / signals / compare in the Trace explorer
+        store_snapshot(question, result, top_k)
+        return result
 
 
 def build_runtime(load_afrb: bool = True, load_failure_iq: bool = True, allow_build: bool = True,

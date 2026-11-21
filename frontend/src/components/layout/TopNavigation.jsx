@@ -8,6 +8,8 @@ const NAV = [
   { to: '/dashboard', label: 'Agent dashboard' },
   { to: '/chat', label: 'Diagnostic chat' },
   { to: '/traces', label: 'Trace explorer' },
+  { to: '/lab', label: 'Experiment lab' },
+  { to: '/fleet', label: 'Fleet analytics' },
 ]
 
 /** Brand mark: a gauge needle in a ring — plain geometry, no stock icon. */

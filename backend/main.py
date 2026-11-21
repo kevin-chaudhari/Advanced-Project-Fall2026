@@ -9,6 +9,12 @@ claim validation, measured confidence and an explicit human-review gate.
 """
 
 import os
+
+# macOS: PyTorch (sentence-transformers) and FAISS each ship their own OpenMP runtime;
+# loading both segfaults at index load. One OpenMP thread avoids the clash.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -25,6 +31,9 @@ from services.runtime import INDEX_NAMES, Runtime, build_runtime  # noqa: E402
 from utils.db import get_agent_aggregates, get_analyses, init_db, save_analysis  # noqa: E402
 from harness.agent_trace.trace_repository import init_trace_tables, link_analysis  # noqa: E402
 from services.trace_api import router as trace_router  # noqa: E402
+from services.experiment_api import build_insights_router, build_review_router, build_router as build_experiment_router  # noqa: E402
+from services.trace_insights import init_tables as init_insight_tables  # noqa: E402
+from services.experiments import init_experiment_tables  # noqa: E402
 from utils.llm_client import llm_client  # noqa: E402
 from utils.logger import setup_logger  # noqa: E402
 
@@ -47,6 +56,11 @@ async def lifespan(app: FastAPI):
         logger.info("[OK] AgentTrace tables ready.")
     except Exception as exc:
         logger.warning("[WARN] Could not initialise AgentTrace tables: %s", exc)
+    try:
+        init_experiment_tables()
+        init_insight_tables()
+    except Exception as exc:
+        logger.warning("[WARN] Could not initialise experiment tables: %s", exc)
     runtime = build_runtime()
     for name, kb in runtime.kbs.items():
         logger.info("[OK] %s knowledge base: %s", name, {k: len(p.records) for k, p in kb.partitions.items()})
@@ -83,6 +97,12 @@ def _bg_save_analysis(question: str, dataset: str, result: dict) -> None:
             link_analysis(trace_id, row_id)      # GET /analyses/{analysis_id}/trace
     except Exception as exc:
         logger.error("[BG] Failed to save analysis: %s", exc, exc_info=True)
+
+
+# Experiment Lab: every run goes through the same pipeline and is saved like a chat diagnosis
+app.include_router(build_experiment_router(lambda: runtime))   # runs are traces only, never analysis history
+app.include_router(build_review_router())
+app.include_router(build_insights_router(lambda: runtime))
 
 
 # ─── System ──────────────────────────────────────────────────────────────────

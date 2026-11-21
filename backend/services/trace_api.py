@@ -43,8 +43,10 @@ def _require(reader: TraceReader, trace_id: str) -> Dict[str, Any]:
 @router.get("/traces", response_model=TraceListResponse)
 async def list_traces(limit: int = Query(default=25, ge=1, le=200), offset: int = Query(default=0, ge=0),
                       status: Optional[str] = Query(default=None, pattern="^(RUNNING|COMPLETED|COMPLETED_WITH_ERRORS|FAILED)$"),
-                      dataset: Optional[str] = None):
-    rows, total = _reader().list_traces(limit=limit, offset=offset, status=status, dataset=dataset)
+                      dataset: Optional[str] = None,
+                      origin: str = Query(default="live", pattern="^(live|experiment|all)$")):
+    # "live" hides the counterfactual runs made by the Experiment Lab
+    rows, total = _reader().list_traces(limit=limit, offset=offset, status=status, dataset=dataset, origin=origin)
     return {"traces": rows, "total": total, "limit": limit, "offset": offset}
 
 

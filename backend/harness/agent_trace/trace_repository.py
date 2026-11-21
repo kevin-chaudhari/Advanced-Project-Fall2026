@@ -328,8 +328,13 @@ class TraceReader:
 
     # traces
     def list_traces(self, limit: int = 50, offset: int = 0, status: Optional[str] = None,
-                    dataset: Optional[str] = None) -> Tuple[List[Dict[str, Any]], int]:
+                    dataset: Optional[str] = None, origin: str = "all") -> Tuple[List[Dict[str, Any]], int]:
         where, params = [], []
+        exp_cond = "COALESCE(config_json,'') LIKE '%\"experiment_id\"%'"   # tagged by services/experiments.py
+        if origin == "experiment":
+            where.append(exp_cond)
+        elif origin == "live":
+            where.append(f"NOT ({exp_cond})")
         if status:
             where.append("status=?"); params.append(status)
         if dataset:
@@ -338,7 +343,8 @@ class TraceReader:
         total = self._q(f"SELECT COUNT(*) AS n FROM agent_traces {w}", tuple(params))[0]["n"]
         rows = self._q(f"""SELECT trace_id, run_id, analysis_id, query, dataset_type, data_mode, status, started_at,
                            completed_at, duration_ms, final_label, final_confidence, review_decision,
-                           communication_rounds, total_messages, llm_mode, code_version FROM agent_traces {w}
+                           communication_rounds, total_messages, llm_mode, code_version,
+                           CASE WHEN {exp_cond} THEN 1 ELSE 0 END AS is_experiment FROM agent_traces {w}
                            ORDER BY started_at DESC, rowid DESC LIMIT ? OFFSET ?""", (*params, limit, offset))
         return [dict(r) for r in rows], int(total)
 

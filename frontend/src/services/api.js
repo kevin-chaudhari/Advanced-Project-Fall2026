@@ -27,8 +27,8 @@ export const getAgentReport = async (limit = 200, dataset = null) =>
   (await api.get('/analyses/agent-report', { params: dataset ? { limit, dataset } : { limit } })).data
 
 /* AgentTrace — every view below reads persisted trace rows from the backend (never sample data). */
-export const listTraces = async ({ limit = 50, offset = 0, dataset = null, status = null } = {}) =>
-  (await api.get('/traces', { params: { limit, offset, ...(dataset ? { dataset } : {}), ...(status ? { status } : {}) } })).data
+export const listTraces = async ({ limit = 50, offset = 0, dataset = null, status = null, origin = 'live' } = {}) =>
+  (await api.get('/traces', { params: { limit, offset, origin, ...(dataset ? { dataset } : {}), ...(status ? { status } : {}) } })).data
 export const getTrace = async (id) => (await api.get(`/traces/${id}`)).data
 export const getTraceMessages = async (id) => (await api.get(`/traces/${id}/messages`)).data
 export const getTraceTimeline = async (id) => (await api.get(`/traces/${id}/timeline`)).data
@@ -47,5 +47,58 @@ export const getTraceScores = async (id) => (await api.get(`/traces/${id}/scores
  *  | llm_calls_csv | scores_csv */
 export const traceExportUrl = (id, format = 'json') => `${BASE_URL}/traces/${id}/export?format=${format}`
 export const traceArchiveUrl = (limit = 20) => `${BASE_URL}/traces/export/archive?limit=${limit}&formats=json,transcript,messages_csv,llm_calls_csv,scores_csv,evidence_csv`
+
+/* Experiment Lab — controlled what-if experiments; every run is a normal diagnosis with its own trace. */
+export const planExperiment = async (question, datasetType = 'afrb', dataMode = 'combined', points = 4) =>
+  (await api.post('/experiments/plan', { question, dataset_type: datasetType, data_mode: dataMode, points })).data
+export const createExperiment = async (body) => (await api.post('/experiments', body)).data
+export const listExperiments = async (limit = 50, filters = {}) => (await api.get('/experiments', { params: { limit, ...filters } })).data
+/** light=true: status and progress only (cheap enough to poll) */
+export const getExperiment = async (id, light = false) => (await api.get(`/experiments/${id}`, { params: light ? { light: true } : {} })).data
+export const compareExperimentRuns = async (id, a, b) => (await api.get(`/experiments/${id}/compare`, { params: { a, b } })).data
+export const cancelExperiment = async (id) => (await api.post(`/experiments/${id}/cancel`)).data
+export const resumeExperiment = async (id) => (await api.post(`/experiments/${id}/resume`)).data
+export const deleteExperiment = async (id) => (await api.delete(`/experiments/${id}`)).data
+
+/** Link that opens the Lab with a question (and the trace it came from) already filled in. */
+export const whatIfLink = (question, { traceId = null, dataset = null } = {}) => {
+  const p = new URLSearchParams({ q: question || '' })
+  if (traceId) p.set('trace', traceId)
+  if (dataset) p.set('dataset', dataset)
+  return `/lab/new?${p.toString()}`
+}
+
+/* Trace insights: step breakdown + signals for one trace, and an N-trace comparison (first id = reference) */
+export const getTraceInsights = async (id) => (await api.get(`/trace-insights/${id}`)).data
+export const traceReportUrl = (id) => `${BASE_URL}/trace-insights/${id}/report`
+export const getFleet = async ({ origin = 'live', dataset = null, limit = 500 } = {}) =>
+  (await api.get('/trace-insights/fleet/summary', { params: { origin, limit, ...(dataset ? { dataset } : {}) } })).data
+export const compareTraces = async (ids, labels = null) =>
+  (await api.get('/trace-insights/compare', { params: { ids: ids.join(','), ...(labels ? { labels: labels.join('|') } : {}) } })).data
+
+/* Human reviewer sign-off on a diagnosis (approve | reject | change), logged per trace */
+export const getReviews = async (traceId) => (await api.get(`/reviews/${traceId}`)).data
+export const addReview = async (traceId, body) => (await api.post(`/reviews/${traceId}`, body)).data
+
+/** Poll until an experiment stops running; retries on network errors with backoff. Returns a cancel function. */
+export function pollExperiment(id, onUpdate, onDone) {
+  let stop = false, timer, wait = 1500
+  const tick = async () => {
+    if (stop) return
+    try {
+      const e = await getExperiment(id, true)
+      wait = 1500
+      if (stop) return
+      onUpdate?.(e)
+      if (e.status === 'running' || e.status === 'queued') timer = setTimeout(tick, wait)
+      else { const full = await getExperiment(id); if (!stop) onDone?.(full) }
+    } catch {
+      wait = Math.min(wait * 2, 15000)
+      timer = setTimeout(tick, wait)
+    }
+  }
+  tick()
+  return () => { stop = true; clearTimeout(timer) }
+}
 
 export default api

@@ -68,3 +68,6 @@ Thumbs.db
 
 # trace exports (backend/scripts/export_traces.py)
 exports/
+
+# Experiment Lab results (backend/services/experiments.py)
+backend/data/experiments.db

@@ -3,6 +3,9 @@ import { Wrench, ShieldAlert, CheckCircle2, Loader2 } from 'lucide-react'
 import { cx, Cited } from '../ui'
 import { ConfidenceIndicator, ReviewDecision, Disclosure, ProvenanceBar } from '../primitives'
 import EvidenceExplorer from '../EvidenceExplorer'
+import RobustnessCheck from '../lab/RobustnessCheck'
+import ReviewPanel from '../lab/ReviewPanel'
+import { ReadingsStrip } from '../lab/LabViews'
 import AgentResponseAccordion from './AgentResponseAccordion'
 import {
   VerificationDetail, verificationMeta, FeedbackDetail, feedbackMeta, CouncilDetail, councilMeta, GateDetail,
@@ -62,6 +65,9 @@ export default function FinalAgentResponse({ s, result, question }) {
             {s.latencyMs != null && <span className="tabular-nums">{Math.round(s.latencyMs)} ms</span>}
             {s.llmMode && <span>{s.llmMode}</span>}
           </div>
+          {result?.harness?.sensor_view?.length > 0 && <div className="mt-3"><ReadingsStrip sensorView={result.harness.sensor_view} /></div>}
+          {question && <div className="mt-3"><RobustnessCheck question={question} dataset={result?.dataset_used} traceId={result?.harness?.trace_id} dataMode={result?.data_mode} topK={result?.harness?.retrieval?.top_k} /></div>}
+          {s.needsReview && result?.harness?.trace_id && <div className="mt-3"><ReviewPanel traceId={result.harness.trace_id} diagnosis={s.label} alternatives={(result.harness.hypothesis_scores || []).map((h) => h.label)} compact /></div>}
         </div>
         <div className="flex md:flex-col items-center md:items-stretch gap-4">
           <div className="shrink-0 md:self-end"><ReviewDecision decision={s.decision} /></div>

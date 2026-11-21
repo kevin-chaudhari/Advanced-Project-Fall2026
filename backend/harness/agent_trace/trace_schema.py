@@ -233,6 +233,7 @@ class TraceListItem(BaseModel):
     total_messages: Optional[int] = None
     llm_mode: Optional[str] = None
     code_version: Optional[str] = None
+    is_experiment: Optional[bool] = None
 
 
 class TraceListResponse(BaseModel):

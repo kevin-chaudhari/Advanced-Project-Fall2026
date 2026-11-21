@@ -6,8 +6,11 @@ import { ConfidenceIndicator, ReviewDecision } from '../components/primitives'
 import CommunicationGraph from '../components/trace/CommunicationGraph'
 import { AgentDetails, CollaborationPanel, Disagreements, EvidenceFlow, MessageInspector, RawEvents, ScoreChanges, TraceSummary, TraceTimeline } from '../components/trace/TracePanels'
 import { useDiagnostics, DATASETS } from '../state/DiagnosticsContext'
-import { getTrace, getTraceAgents, getTraceEvidence, getTraceHypotheses, getTraceMessages, getTraceTimeline, listTraces, traceArchiveUrl, traceExportUrl } from '../services/api'
+import { getTrace, getTraceAgents, getTraceEvidence, getTraceHypotheses, getTraceMessages, getTraceTimeline, getTraceInsights, listTraces, sendQuery, traceReportUrl, traceArchiveUrl, traceExportUrl } from '../services/api'
 import { fmtMs } from '../lib/traceVocab'
+import RobustnessCheck from '../components/lab/RobustnessCheck'
+import { MultiCompare, SignalsPanel, StepBreakdown, TracePicker } from '../components/trace/InsightPanels'
+import ReviewPanel from '../components/lab/ReviewPanel'
 
 /*
  * Trace Explorer: how the six agents talked during one diagnosis.
@@ -17,9 +20,9 @@ import { fmtMs } from '../lib/traceVocab'
 
 const STATUS_TONE = { COMPLETED: 'text-success-700', COMPLETED_WITH_ERRORS: 'text-warning-700', FAILED: 'text-danger-700', RUNNING: 'text-muted' }
 const STATUS_TEXT = { COMPLETED: 'Completed', COMPLETED_WITH_ERRORS: 'Completed, an agent failed', FAILED: 'Failed', RUNNING: 'Incomplete' }
-const TABS = [['collaboration', 'How they agreed'], ['timeline', 'Timeline'], ['agents', 'Agents'], ['evidence', 'Evidence flow'], ['scores', 'Score changes'], ['disagreements', 'Disagreements'], ['events', 'Raw events']]
+const TABS = [['steps', 'Step breakdown'], ['signals', 'Signals'], ['compare', 'Compare traces'], ['collaboration', 'How they agreed'], ['timeline', 'Timeline'], ['agents', 'Agents'], ['evidence', 'Evidence flow'], ['scores', 'Score changes'], ['disagreements', 'Disagreements'], ['events', 'Raw events']]
 
-function TraceList({ traces, total, selected, onSelect, loading, onRefresh, error }) {
+function TraceList({ traces, total, selected, onSelect, loading, onRefresh, error, origin, setOrigin }) {
   const ds = (id) => DATASETS.find((d) => d.id === id)?.label || id
   return (
     <aside className="flex min-h-0 flex-col border-b md:border-b-0 md:border-r border-line bg-canvas" aria-label="Diagnostic traces">
@@ -31,6 +34,10 @@ function TraceList({ traces, total, selected, onSelect, loading, onRefresh, erro
           {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
         </button>
       </div>
+      <label className="flex items-center gap-1.5 px-4 pb-2 text-[11.5px] text-muted cursor-pointer">
+        <input type="checkbox" className="accent-primary-700" checked={origin === 'all'} onChange={(e) => setOrigin(e.target.checked ? 'all' : 'live')} />
+        Include experiment runs (hypothetical inputs)
+      </label>
       {error && <p className="px-4 pb-3 text-[12px] text-danger-700">{error}</p>}
       <ol className="min-h-0 flex-1 overflow-y-auto max-h-[220px] md:max-h-none">
         {traces.map((t) => (
@@ -42,6 +49,7 @@ function TraceList({ traces, total, selected, onSelect, loading, onRefresh, erro
                 <span className="font-medium text-ink">{t.final_label || '—'}</span>
                 <span>{ds(t.dataset_type)}, {t.data_mode}</span>
                 <span className="tabular-nums">{t.total_messages ?? 0} msgs</span>
+                {t.is_experiment && <span className="text-warning-700">experiment run</span>}
                 {t.status !== 'COMPLETED' && <span className={STATUS_TONE[t.status]}>{STATUS_TEXT[t.status]}</span>}
               </p>
             </button>
@@ -57,19 +65,24 @@ export default function TraceExplorerPage() {
   const nav = useNavigate()
   const { latest } = useDiagnostics()
   const [list, setList] = useState({ traces: [], total: 0, loading: true })
+  const [origin, setOrigin] = useState('live')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [tab, setTab] = useState('collaboration')
+  const [tab, setTab] = useState('steps')
+  const [insights, setInsights] = useState(undefined)   // undefined = loading, null = no snapshot
+  const [focusStep, setFocusStep] = useState(null)
+  const [compareIds, setCompareIds] = useState(null)
+  const [rerunning, setRerunning] = useState(false)
   const [selectedMsg, setSelectedMsg] = useState(null)
   const [selectedAgent, setSelectedAgent] = useState(null)
   const [selectedEdge, setSelectedEdge] = useState(null)
 
   const refreshList = useCallback(() => {
     setList((l) => ({ ...l, loading: true }))
-    listTraces({ limit: 100 }).then((r) => setList({ traces: r.traces, total: r.total, loading: false }))
+    listTraces({ limit: 100, origin }).then((r) => setList({ traces: r.traces, total: r.total, loading: false }))
       .catch((e) => setList({ traces: [], total: 0, loading: false, error: e.code === 'ERR_NETWORK' ? 'Cannot reach the backend.' : e.message }))
-  }, [])
+  }, [origin])
   useEffect(() => { refreshList() }, [refreshList])
 
   // default: the trace of the latest diagnosis in this session, else the newest stored trace
@@ -80,6 +93,8 @@ export default function TraceExplorerPage() {
   useEffect(() => {
     if (!active) return
     let live = true
+    setInsights(undefined); setCompareIds(null); setFocusStep(null)
+    getTraceInsights(active).then((d) => live && setInsights(d)).catch(() => live && setInsights(null))
     setLoading(true); setError(null); setSelectedMsg(null); setSelectedEdge(null); setSelectedAgent(null)
     Promise.all([getTrace(active), getTraceMessages(active), getTraceTimeline(active), getTraceEvidence(active), getTraceHypotheses(active), getTraceAgents(active)])
       .then(([trace, msgs, timeline, evidence, hyps, agents]) => {
@@ -113,7 +128,7 @@ export default function TraceExplorerPage() {
   return (
     <div className="h-full grid md:grid-cols-[280px_minmax(0,1fr)] min-h-0">
       <TraceList traces={list.traces} total={list.total} selected={active} onSelect={(id) => nav(`/traces/${id}`)}
-        loading={list.loading} onRefresh={refreshList} error={list.error} />
+        loading={list.loading} onRefresh={refreshList} error={list.error} origin={origin} setOrigin={setOrigin} />
 
       <div className="min-h-0 overflow-y-auto">
         {error && (
@@ -124,6 +139,13 @@ export default function TraceExplorerPage() {
         {loading && !data && <p className="p-6 text-[13px] text-muted flex items-center gap-2"><Loader2 size={14} className="animate-spin" />Loading trace…</p>}
         {data && t && (
           <div className={cx('mx-auto max-w-[1280px] px-4 sm:px-6 py-5 space-y-6', loading && 'opacity-60')}>
+            {t.config?.experiment && (
+              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-warning-100 bg-warning-50 px-3 py-2 text-[12.5px]">
+                <button type="button" onClick={() => (window.history.state?.idx > 0 ? nav(-1) : nav(`/lab/${t.config.experiment.experiment_id}`))}
+                  className="btn-primary py-1 text-[12.5px]">← Back to experiment</button>
+                <span className="text-ink">This trace is run “{t.config.experiment.label}” of experiment <span className="mono">{t.config.experiment.experiment_id}</span> — a hypothetical input, not a real diagnosis.</span>
+              </div>
+            )}
             <header className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px] items-start">
               <div className="min-w-0">
                 <p className="mono text-[11.5px] text-muted">{t.trace_id}{t.analysis_id ? `, analysis ${t.analysis_id}` : ''}</p>
@@ -142,7 +164,12 @@ export default function TraceExplorerPage() {
                   {t.code_version?.git?.branch && <span>, branch {t.code_version.git.branch}</span>}
                   {t.code_version?.git?.dirty && <span className="text-warning-700">, uncommitted changes ({t.code_version.git.changed_files_count} file{t.code_version.git.changed_files_count === 1 ? '' : 's'})</span>}
                 </p>
+                <div className="mt-2">{t.config?.experiment ? (
+                  <p className="rounded-md border border-warning-100 bg-warning-50 px-2.5 py-1.5 text-[12px] text-ink">Experiment run (a hypothetical input, not a real diagnosis): “{t.config.experiment.label}” of{' '}
+                    <a href={`/lab/${t.config.experiment.experiment_id}`} className="font-medium text-primary-700 underline underline-offset-2">{t.config.experiment.experiment_id}</a>.</p>
+                ) : <RobustnessCheck key={t.trace_id} question={t.query} dataset={t.dataset_type} traceId={t.trace_id} dataMode={t.data_mode} topK={t.config?.top_k} />}</div>
                 <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[12px]">
+                  <a href={traceReportUrl(t.trace_id)} target="_blank" rel="noreferrer" className="rounded-md border border-ink bg-ink px-2 py-1 font-medium text-surface hover:opacity-90 focus-ring">Run report (print / PDF)</a>
                   <span className="text-muted">Download this trace:</span>
                   {[['json', 'Full JSON'], ['transcript', 'Conversation (.md)'], ['messages_csv', 'Messages CSV'], ['events_csv', 'Events CSV'],
                     ['executions_csv', 'Agent runs CSV'], ['evidence_csv', 'Evidence CSV'], ['llm_calls_csv', 'Model calls CSV'],
@@ -161,6 +188,7 @@ export default function TraceExplorerPage() {
                   {t.review_decision && <ReviewDecision decision={t.review_decision} variant="inline" />}
                 </div>
                 {t.final_confidence != null && <div className="mt-3"><ConfidenceIndicator value={t.final_confidence} threshold={0.65} /></div>}
+                {!t.config?.experiment && <div className="mt-3 -mx-1"><ReviewPanel key={t.trace_id} traceId={t.trace_id} diagnosis={t.final_label} alternatives={[...new Set((data.hypotheses || []).map((h) => h.label))]} compact /></div>}
                 {s.confidence_progression?.length > 1 && (
                   <p className="mt-2 text-[11.5px] text-muted">Confidence over the run: {s.confidence_progression.map((c) => c.confidence?.toFixed(2)).join(' → ')}</p>
                 )}
@@ -187,11 +215,29 @@ export default function TraceExplorerPage() {
                   <button key={id} role="tab" type="button" aria-selected={tab === id} onClick={() => setTab(id)}
                     className={cx('relative whitespace-nowrap py-2 text-[13px] focus-ring rounded-sm', tab === id ? 'font-semibold text-ink after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:bg-ink' : 'text-muted hover:text-ink')}>
                     {label}
+                    {id === 'signals' && insights?.signals?.length > 0 && <span className={cx('ml-1.5 text-[11px] tabular-nums', insights.signals.some((x) => x.severity === 'high') ? 'text-danger-700 font-semibold' : 'text-muted')}>{insights.signals.length}</span>}
                     {id === 'disagreements' && data.disagreements.length > 0 && <span className="ml-1.5 text-[11px] text-muted tabular-nums">{data.disagreements.length}</span>}
                   </button>
                 ))}
               </div>
               <div className="pt-4" role="tabpanel">
+                {['steps', 'signals', 'compare'].includes(tab) && insights === undefined && <p className="flex items-center gap-2 text-[13px] text-muted"><Loader2 size={14} className="animate-spin" />Loading…</p>}
+                {['steps', 'signals'].includes(tab) && insights === null && (
+                  <div className="rounded-lg border border-dashed border-line p-4 text-[12.5px] text-muted">
+                    This trace was recorded before step recording was added, so it has no step breakdown or signals.{' '}
+                    <button type="button" disabled={rerunning} className="font-medium text-primary-700 underline underline-offset-2"
+                      onClick={async () => { setRerunning(true); try { const r = await sendQuery(t.query, t.dataset_type, t.data_mode, t.config?.top_k || 8); nav(`/traces/${r.harness.trace_id}`) } finally { setRerunning(false) } }}>
+                      {rerunning ? 'Re-running…' : 'Re-run this question now'}</button> to get a new trace with it.
+                  </div>
+                )}
+                {tab === 'steps' && insights && <StepBreakdown data={insights} focus={focusStep} />}
+                {tab === 'signals' && insights && <SignalsPanel signals={insights.signals} onGoToStep={(k) => { setFocusStep(k); setTab('steps') }} />}
+                {tab === 'compare' && insights !== undefined && (
+                  <div className="space-y-4">
+                    <TracePicker current={t} onCompare={setCompareIds} />
+                    {compareIds && <MultiCompare ids={compareIds} />}
+                  </div>
+                )}
                 {tab === 'collaboration' && <CollaborationPanel positions={data.positions} summary={s} onSelect={selectMessage} />}
                 {tab === 'timeline' && <TraceTimeline timeline={data.timeline} selectedId={selectedMsg} onSelect={setSelectedMsg}
                   agentFilter={selectedAgent} edgeFilter={selectedEdge} onClearFilters={() => { setSelectedAgent(null); setSelectedEdge(null) }} />}
