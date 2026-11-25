@@ -33,7 +33,7 @@ function ConnectionStatus() {
   return (
     <div className="flex items-center gap-1.5 text-[12px] text-muted" title={engine || undefined}>
       <span className={cx('w-1.5 h-1.5 rounded-full', dot)} aria-hidden />
-      <span className="hidden sm:inline whitespace-nowrap">{text}</span>
+      <span className="hidden sm:inline xl:hidden 2xl:inline whitespace-nowrap">{text}</span>
       <button type="button" onClick={refreshHealth} className="btn-ghost p-1 rounded-md" aria-label="Recheck backend connection" title="Recheck connection">
         <RefreshCw size={13} />
       </button>
@@ -51,7 +51,7 @@ function DatasetPicker() {
   }
   return (
     <label className="flex items-center gap-1.5 text-[12px] text-muted">
-      <span className="hidden lg:inline">Dataset</span>
+      <span className="hidden lg:inline xl:hidden 2xl:inline">Dataset</span>
       <select value={dataset} onChange={onChange} aria-label="Dataset"
         className="rounded-md border border-line bg-surface py-1 pl-2 pr-7 text-[12.5px] font-medium text-ink focus-ring cursor-pointer">
         {DATASETS.map((d) => {
@@ -71,11 +71,11 @@ export default function TopNavigation() {
   return (
     <header className="shrink-0 border-b border-line bg-canvas/95 backdrop-blur-[2px]">
       <div className="flex items-center gap-3 sm:gap-6 px-4 sm:px-6 h-[52px]">
-        <NavLink to="/" className="flex items-center gap-2 min-w-0 focus-ring rounded-md" aria-label="Mission Control for Agentic AI — overview">
+        <NavLink to="/" className="flex shrink-0 items-center gap-2 focus-ring rounded-md" aria-label="Mission Control for Agentic AI — overview">
           <Mark />
-          <span className="text-[14px] font-semibold tracking-[-0.01em] text-ink whitespace-nowrap hidden min-[420px]:inline">Mission Control<span className="hidden xl:inline"> for Agentic AI</span></span>
+          <span className="text-[14px] font-semibold tracking-[-0.01em] text-ink whitespace-nowrap hidden min-[420px]:inline">Mission Control<span className="hidden min-[1680px]:inline"> for Agentic AI</span></span>
         </NavLink>
-        <nav className="hidden md:flex items-center gap-5 self-stretch" aria-label="Primary">
+        <nav className="hidden xl:flex items-center gap-4 2xl:gap-5 self-stretch" aria-label="Primary">
           {NAV.map((n) => <NavLink key={n.to} to={n.to} end={n.end} className={link}>{n.label}</NavLink>)}
           <span className="h-4 w-px bg-line" aria-hidden />
           <NavLink to="/analysis" className={({ isActive }) => cx(link({ isActive }), !isActive && 'text-[12.5px]')}>Data & evaluation</NavLink>
@@ -85,8 +85,8 @@ export default function TopNavigation() {
           <ConnectionStatus />
         </div>
       </div>
-      {/* compact tab row below md */}
-      <nav className="md:hidden flex items-center gap-5 overflow-x-auto px-4 border-t border-line" aria-label="Primary">
+      {/* second tab row below xl (eight items do not fit beside the brand and controls) */}
+      <nav className="xl:hidden flex items-center gap-5 overflow-x-auto px-4 border-t border-line" aria-label="Primary">
         {NAV.map((n) => <NavLink key={n.to} to={n.to} end={n.end} className={link}>{n.label}</NavLink>)}
         <NavLink to="/analysis" className={link}>Data & evaluation</NavLink>
       </nav>
