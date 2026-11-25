@@ -13,6 +13,8 @@ import { getFleet } from '../services/api'
 
 const C = { auto: '#78866B', review: '#C18D4D', grid: '#E5DED1', ink: '#4A453D', accent: '#6E5A3E' }
 const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`)
+// small groups read better as counts: "3 of 12", not "25%"
+const share = (rate, total) => (rate == null ? '—' : total < 20 ? `${Math.round(rate * total)} of ${total}` : pct(rate))
 const SEV = { high: 'text-danger-700', medium: 'text-warning-700', info: 'text-muted' }
 
 function Tile({ label, value, hint }) {
@@ -42,7 +44,7 @@ function Heatmap({ heat }) {
   return (
     <div className="overflow-x-auto">
       <table className="text-[11.5px]">
-        <thead><tr><th />{signals.map((s) => <th key={s} className="px-0.5 pb-1 align-bottom font-normal text-muted"><span className="block max-h-[120px] whitespace-nowrap [writing-mode:vertical-rl] rotate-180">{s.replace(/_/g, ' ')}</span></th>)}</tr></thead>
+        <thead><tr><th />{signals.map((s) => <th key={s} className="px-0.5 pb-1 align-bottom font-normal text-muted"><span className="block max-h-[120px] whitespace-nowrap [writing-mode:vertical-rl] rotate-180">{heat.labels?.[s] || s.replace(/_/g, ' ')}</span></th>)}</tr></thead>
         <tbody>
           {answers.map((a) => (
             <tr key={a}>
@@ -51,7 +53,7 @@ function Heatmap({ heat }) {
                 const n = cells[a]?.[s] || 0
                 const total = Object.values(cells[a] || {}).length ? Math.max(...Object.values(cells[a])) : 1
                 const share = counts[a] ? n / Math.max(total, 1) : 0
-                return <td key={s} className="p-0.5"><span title={`${a} · ${s}: ${n}`} className="grid h-7 w-7 place-items-center rounded-[3px] tabular-nums text-[10.5px]"
+                return <td key={s} className="p-0.5"><span title={`${a} · ${heat.labels?.[s] || s}: ${n}`} className="grid h-7 w-7 place-items-center rounded-[3px] tabular-nums text-[10.5px]"
                   style={{ background: n ? `rgba(193,141,77,${0.15 + 0.85 * share})` : '#F1ECE1', color: share > 0.6 ? '#FFFCF5' : '#4A453D' }}>{n || ''}</span></td>
               })}
             </tr>
@@ -101,7 +103,7 @@ export default function FleetAnalyticsPage() {
         {data?.total > 0 && <>
           <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             <Tile label="Diagnoses" value={data.total} hint={`${data.with_snapshot} with step recording`} />
-            <Tile label="Sent to human review" value={pct(data.review_rate)} hint={`${data.requires_review} of ${data.total}`} />
+            <Tile label="Sent to human review" value={share(data.review_rate, data.total)} hint={`${data.requires_review} of ${data.total}`} />
             <Tile label="Average confidence" value={pct(data.avg_confidence)} hint="recorded score, not calibrated" />
             <Tile label="Reviewer decisions" value={Object.values(data.reviews).reduce((a, b) => a + b, 0)}
               hint={Object.entries(data.reviews).map(([k, v]) => `${v} ${k}`).join(' · ') || 'none yet'} />
@@ -153,14 +155,16 @@ export default function FleetAnalyticsPage() {
           </div>
 
           <div className="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
-            <Panel title="How often each check fires" subtitle={`Share of the ${data.with_snapshot} diagnoses with step recording.`}>
+            <Panel title="How often each check fires" subtitle={`Diagnoses where each check fired, out of the ${data.with_snapshot} with step recording. Gaps (things that should have happened and did not) come first.`}>
               {data.signals.length ? (
                 <ul className="space-y-1.5">
                   {data.signals.map((s) => (
-                    <li key={s.id} className="grid grid-cols-[minmax(0,1fr)_120px_44px] items-center gap-2 text-[12.5px]">
-                      <span className="truncate"><span className={cx('font-medium', SEV[s.severity])}>{s.title}</span>{s.kind === 'gap' && <span className="ml-1 text-[10.5px] uppercase text-muted">gap</span>}</span>
-                      <span className="h-2 rounded-full bg-well"><span className="block h-full rounded-full bg-warning-500" style={{ width: `${s.rate * 100}%` }} /></span>
-                      <span className="text-right tabular-nums text-muted">{pct(s.rate)}</span>
+                    <li key={s.id} className="grid grid-cols-[minmax(0,1fr)_100px_64px] items-center gap-2 text-[12.5px]">
+                      <span className="min-w-0 truncate" title={s.title}>
+                        {s.kind === 'gap' && <span className="mr-1.5 rounded bg-danger-50 px-1 py-px text-[10px] font-semibold uppercase tracking-wide text-danger-700">gap</span>}
+                        <span className={cx('font-medium', s.kind === 'gap' ? 'text-danger-700' : SEV[s.severity])}>{s.title}</span></span>
+                      <span className="h-2 rounded-full bg-well"><span className={cx('block h-full rounded-full', s.kind === 'gap' ? 'bg-danger-500' : 'bg-warning-500')} style={{ width: `${s.rate * 100}%` }} /></span>
+                      <span className="text-right tabular-nums text-muted" title={pct(s.rate)}>{s.count} of {s.of ?? data.with_snapshot}</span>
                     </li>
                   ))}
                 </ul>
@@ -178,7 +182,7 @@ export default function FleetAnalyticsPage() {
                   <thead className="text-left text-muted"><tr><th className="py-1 pr-3 font-medium">Answer</th><th className="py-1 pr-3 font-medium">Count</th><th className="py-1 pr-3 font-medium">Human review</th><th className="py-1 pr-3 font-medium">Avg confidence</th><th className="py-1 font-medium">Avg lead</th></tr></thead>
                   <tbody>{data.by_answer.map((a) => (
                     <tr key={a.answer} className="border-t border-line"><td className="py-1 pr-3 text-ink">{a.answer}</td><td className="py-1 pr-3 tabular-nums">{a.count}</td>
-                      <td className="py-1 pr-3 tabular-nums">{pct(a.review_rate)}</td><td className="py-1 pr-3 tabular-nums">{pct(a.avg_confidence)}</td>
+                      <td className="py-1 pr-3 tabular-nums">{share(a.review_rate, a.count)}</td><td className="py-1 pr-3 tabular-nums">{pct(a.avg_confidence)}</td>
                       <td className="py-1 tabular-nums">{a.avg_margin == null ? '—' : a.avg_margin.toFixed(2)}</td></tr>
                   ))}</tbody>
                 </table>

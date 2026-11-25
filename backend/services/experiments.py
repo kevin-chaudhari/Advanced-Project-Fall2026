@@ -241,7 +241,7 @@ def design_runs(kind: str, spec: Dict[str, Any]) -> List[Dict[str, Any]]:
         for sensor, values in factors.items():
             if sensor not in SENSOR_SPECS:
                 raise ValueError(f"Unknown sensor '{sensor}'")
-            for v in dict.fromkeys(float(x) for x in values):
+            for v in dict.fromkeys(round(float(x), SENSOR_SPECS[sensor]["decimals"]) for x in values):
                 if sensor in readings and abs(readings[sensor] - v) < 1e-9:
                     continue
                 add(sensor, v, f"{SENSOR_SPECS[sensor]['label']} = {_fmt(sensor, v)} {_unit(sensor)}".rstrip(),
@@ -259,7 +259,7 @@ def design_runs(kind: str, spec: Dict[str, Any]) -> List[Dict[str, Any]]:
             if k != base_cfg["top_k"]:
                 add("top_k", k, f"top_k = {k}", f"k={k}", "settings", config={"top_k": k})
         for i in range(min(int(factors.get("drop_evidence") or 0), 10)):
-            add("drop_evidence", i + 1, f"Without cited evidence #{i + 1}", f"−EV{i + 1}", "evidence", drop_rank=i)
+            add("drop_evidence", i + 1, f"Leave out cited evidence #{i + 1}", f"−EV{i + 1}", "evidence", drop_rank=i)
     elif kind == "robustness":
         override = factors.get("tolerance_pct")
         if override is not None and not 0 < float(override) <= 25:
@@ -278,7 +278,7 @@ def design_runs(kind: str, spec: Dict[str, Any]) -> List[Dict[str, Any]]:
                 add("all_readings", sign, f"All readings {'+' if sign > 0 else '−'}tolerance together",
                     f"All {'+' if sign > 0 else '−'}", "joint", overrides=ov)
         for i in range(min(int(factors.get("drop_evidence", 3)), 10)):
-            add("drop_evidence", i + 1, f"Without cited evidence #{i + 1}", f"−EV{i + 1}", "evidence", drop_rank=i)
+            add("drop_evidence", i + 1, f"Leave out cited evidence #{i + 1}", f"−EV{i + 1}", "evidence", drop_rank=i)
         # readings outside their normal band: a wider sweep finds how far the answer is from flipping
         for sensor, base in readings.items():
             b = bands.get(sensor)
@@ -441,6 +441,21 @@ def step_signature(step: Dict[str, Any], ev_labels: Dict[str, str], ev_sources: 
     return _NUM_RE.sub("#", reason)[:80] or action
 
 
+def plain_signature(sig: str) -> str:
+    """Readable decision text: 'n numeric channel(s), 0 directional cue(s)' → 'numeric readings, 0 directional cues'.
+    Applied when signatures are made and when stored ones are read back, so comparisons stay consistent."""
+    s = re.sub(r"^n numeric channel\(s\)", "numeric readings", str(sig))
+    s = re.sub(r"\b(\d+) ((?:\w+ )*?\w+)\(s\)", lambda m: f"{m[1]} {m[2]}{'' if m[1] == '1' else 's'}", s)
+    return s.replace("(s)", "s")
+
+
+def plain_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for st in steps:
+        if "signature" in st:
+            st["signature"] = plain_signature(st["signature"])
+    return steps
+
+
 def _step_key_base(step: Dict[str, Any]) -> str:
     action = str(step.get("action") or "")
     verb = action.split(".", 1)[1].split(" ", 1)[0] if "." in action else ""
@@ -457,8 +472,30 @@ def compact_steps(timeline: List[Dict[str, Any]], evidence: List[Dict[str, Any]]
         seen[base] += 1
         out.append({"key": f"{base}#{seen[base]}", "position": i, "stage": t.get("stage"), "agent": t.get("agent"),
                     "action": t.get("action"), "status": t.get("status"), "reason": str(t.get("reason") or "")[:400],
-                    "signature": step_signature(t, ev_labels, ev_sources), "duration_ms": t.get("duration_ms")})
+                    "signature": plain_signature(step_signature(t, ev_labels, ev_sources)), "duration_ms": t.get("duration_ms")})
+        if t.get("stage") in ("initial_rag", "targeted_rag"):
+            out[-1]["sources"] = dict(Counter(ev_sources.get(e, "?") for e in (t.get("evidence_used") or [])))
     return out
+
+
+def second_check(steps: List[Dict[str, Any]], feedback_rounds: Optional[int] = None, review_decision: Optional[str] = None,
+                 council: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Did the answer get a second look? The second look is the extra evidence search (feedback loop,
+    ``targeted_rag``) and/or the council debate. Also: what the extra search found (real vs synthetic)."""
+    rag = [s for s in steps or [] if s.get("stage") == "targeted_rag"]
+    searched = bool(rag) or (feedback_rounds or 0) > 0
+    convened = bool((council or {}).get("convened")) or any(
+        s.get("stage") == "council" and s.get("signature") == "council convened" for s in steps or [])
+    sources: Counter = Counter()
+    for s in rag:
+        sources.update(s.get("sources") or {})
+    found = [s for s in rag if s.get("signature") != "no evidence"]
+    if sources:
+        synth_only = bool(sources.get("synthetic")) and not sources.get("real")
+    else:                           # older records: no counts, read the step's decision instead
+        synth_only = bool(found) and all(str(s.get("signature", "")).startswith("synthetic evidence") for s in found)
+    return {"searched": searched, "council": convened, "synthetic_only": synth_only, "sources": dict(sources),
+            "auto_no_check": review_decision == "AUTO_RESOLVE" and not searched and not convened}
 
 
 # ─── Runner ──────────────────────────────────────────────────────────────────
@@ -622,13 +659,14 @@ def _load_runs(exp_id: str) -> List[Dict[str, Any]]:
         rows = c.execute("SELECT * FROM experiment_runs WHERE experiment_id=? ORDER BY run_index", (exp_id,)).fetchall()
     return [{
         "run_index": r["run_index"], "is_baseline": bool(r["is_baseline"]), "factor": r["factor"],
-        "value": json.loads(r["value_json"]) if r["value_json"] else None, "label": r["label"],
-        "short": r["short_label"] or r["label"], "group": r["run_group"] or ("baseline" if r["is_baseline"] else "sweep"),
+        "value": json.loads(r["value_json"]) if r["value_json"] else None,
+        "label": r["label"].replace("Without cited evidence", "Leave out cited evidence"),
+        "short": r["short_label"] or r["label"].replace("Without cited evidence", "Leave out cited evidence"), "group": r["run_group"] or ("baseline" if r["is_baseline"] else "sweep"),
         "rewrite_mode": r["rewrite_mode"], "question": r["question"], "config": json.loads(r["config_json"]),
         "status": r["status"], "trace_id": r["trace_id"], "answer": r["predicted_label"], "confidence": r["confidence"],
         "review_decision": r["review_decision"], "feedback_rounds": r["feedback_rounds"], "latency_ms": r["latency_ms"],
         "error": r["error"], "outcome": json.loads(r["outcome_json"]) if r["outcome_json"] else None,
-        "steps": json.loads(r["steps_json"]) if r["steps_json"] else [],
+        "steps": plain_steps(json.loads(r["steps_json"])) if r["steps_json"] else [],
     } for r in rows]
 
 
@@ -653,11 +691,16 @@ def get_experiment(exp_id: str, embedder_id: Optional[str] = None, light: bool =
         return out
     done = [r for r in runs if r["status"] == "done"]
     baseline = next((r for r in runs if r["is_baseline"] and r["status"] == "done"), None)
-    out["runs"] = [{k: v for k, v in r.items() if k != "steps"} for r in runs]
+    out["runs"] = [{**{k: v for k, v in r.items() if k != "steps"},
+                    "check": run_check(r) if r["status"] == "done" else None} for r in runs]
     out["analysis"] = analyse(done, baseline, embedder_id or out["versions"].get("embedder"), exp["kind"], spec,
                               finished=exp["status"] == "done", failed=out["progress"]["failed"])
-    if out["verdict"] is None and out["analysis"].get("verdict", {}) and exp["status"] == "done":
-        out["verdict"] = out["analysis"]["verdict"]
+    live = out["analysis"].get("verdict")
+    if out["verdict"] is not None and live and out["verdict"].get("v") != VERDICT_VERSION and exp["status"] == "done":
+        # recorded under older rules: keep the record, show the verdict under the current rules
+        out["recorded_verdict"], out["verdict"] = out["verdict"], {**live, "rederived": True}
+    if out["verdict"] is None and live and exp["status"] == "done":
+        out["verdict"] = live
     return out
 
 
@@ -672,6 +715,8 @@ def freeze_verdict(exp_id: str) -> None:
 
 # ─── Analysis ────────────────────────────────────────────────────────────────
 
+FACTOR_LABEL = {"drop_evidence": "Leave out cited evidence", "top_k": "Evidence records retrieved (top_k)", "data_mode": "Data source"}
+LINK_LIFT = 0.25       # "linked" only if a decision group reaches its answer this much more often than all runs do
 MIN_GROUP = 2          # a step decision seen in a single run says nothing about the answer
 
 
@@ -699,6 +744,7 @@ def analyse(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], embe
     answers = Counter(r["answer"] or "Unknown" for r in done)
     reviews = Counter(r["review_decision"] or "Unknown" for r in done)
     others = [r for r in done if r is not baseline]
+    checks = {r["run_index"]: run_check(r) for r in done}
 
     # per-factor sweeps (baseline included as the factor's reference point)
     factors: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -720,7 +766,8 @@ def analyse(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], embe
         review_flips = [p for p in group if baseline and p["review_decision"] != baseline["review_decision"]]
         confs = [p["confidence"] or 0 for p in pts]
         factor_summaries.append({
-            "factor": f, "label": SENSOR_SPECS[f]["label"] if f in SENSOR_SPECS else f.replace("_", " "),
+            "factor": f, "label": SENSOR_SPECS[f]["label"] if f in SENSOR_SPECS else FACTOR_LABEL.get(f, f.replace("_", " ")), "is_sensor": f in SENSOR_SPECS,
+            "decimals": SENSOR_SPECS[f]["decimals"] if f in SENSOR_SPECS else None,
             "unit": _unit(f) if f in SENSOR_SPECS else "", "numeric": numeric, "baseline_value": base_value,
             "run_count": len(group), "answer_flips": len(flips), "review_flips": len(review_flips),
             "confidence_range": [round(min(confs), 3), round(max(confs), 3)] if confs else None,
@@ -737,7 +784,8 @@ def analyse(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], embe
     for r in done:
         for s in r["steps"]:
             by_key[s["key"]].append((r, s))
-    order = sorted(by_key, key=lambda k: sorted(s["position"] for _, s in by_key[k])[len(by_key[k]) // 2])
+    order = step_order(by_key, baseline)
+    numbers = step_numbers(done, baseline)
     dominant_rate = answers.most_common(1)[0][1] / len(done)
     base_steps = {s["key"]: s for s in (baseline["steps"] if baseline else [])}
     divergence, first_divergent_key = [], None
@@ -750,14 +798,44 @@ def analyse(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], embe
             groups[s["signature"]][r["answer"] or "Unknown"] += 1
         link, linked = _answer_link(items, len(answers), dominant_rate)
         n_changed = sum(1 for _, s in items if s["signature"] != ref_sig)
+        ranked = sigs.most_common()
+        rest = ranked[6:]
+        other_answers: Counter = Counter()
+        for sig, _ in rest:
+            other_answers.update(groups[sig])
+        ran = {r["run_index"] for r, _ in items}
+        absent: Dict[str, Dict[str, Any]] = {}
+        for r in done:
+            if r["run_index"] not in ran:
+                why = _absent_reason(items[0][1]["stage"], key, checks[r["run_index"]])
+                g = absent.setdefault(why, {"reason": why, "count": 0, "answers": Counter(), "run_indexes": []})
+                g["count"] += 1
+                g["answers"][r["answer"] or "Unknown"] += 1
+                g["run_indexes"].append(r["run_index"])
+        link_detail = None
+        for sig, g in groups.items():           # the decision group that best predicts its answer (lift over all runs)
+            tot = sum(g.values())
+            if tot < MIN_GROUP:
+                continue
+            ans, n = g.most_common(1)[0]
+            cand = {"signature": sig, "answer": ans, "runs": tot, "rate": round(n / tot, 3),
+                    "base_rate": round(answers[ans] / len(done), 3), "is_baseline": sig == ref_sig}
+            cand["lift"] = round(cand["rate"] - cand["base_rate"], 3)
+            if link_detail is None or cand["lift"] > link_detail["lift"]:
+                link_detail = cand
+        linked = linked and link_detail is not None and link_detail["lift"] >= LINK_LIFT
         entry = {
-            "key": key, "stage": items[0][1]["stage"], "agent": items[0][1]["agent"],
+            "key": key, "number": numbers.get(key), "stage": items[0][1]["stage"], "agent": items[0][1]["agent"],
             "run_count": len(items), "missing_runs": len(done) - len(items),
             "changed_runs": n_changed, "distinct_variants": len(sigs), "baseline_signature": ref_sig,
-            "answer_link_score": link, "answer_linked": linked,
+            "answer_link_score": link, "answer_linked": linked, "link_detail": link_detail,
+            "signatures": [sig for sig, _ in ranked],
             "variants": [{"signature": sig, "count": n, "answers": dict(groups[sig]),
                           "run_indexes": [r["run_index"] for r, s in items if s["signature"] == sig][:60]}
-                         for sig, n in sigs.most_common(6)],
+                         for sig, n in ranked[:6]],
+            "other_variants": ({"signatures": len(rest), "count": sum(n for _, n in rest), "answers": dict(other_answers)}
+                               if rest else None),
+            "absent": [{**g, "answers": dict(g["answers"])} for g in absent.values()],
         }
         if first_divergent_key is None and n_changed and linked:
             first_divergent_key = key
@@ -771,6 +849,23 @@ def analyse(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], embe
     representative = [{"run_index": r["run_index"], "label": r["label"], "short": r["short"], "answer": r["answer"],
                        "confidence": r["confidence"], "review_decision": r["review_decision"], "trace_id": r["trace_id"],
                        "steps": r["steps"]} for r in reps[:6]]
+    # every run, compactly: per aligned step the index of its decision in that step's ``signatures`` (null = did not run)
+    sig_index = [{sig: i for i, sig in enumerate(d["signatures"])} for d in divergence]
+    ribbon_runs = []
+    for r in done:
+        mine = {s["key"]: s["signature"] for s in r["steps"]}
+        ribbon_runs.append({
+            "run_index": r["run_index"], "label": r["label"], "short": r["short"], "is_baseline": r["is_baseline"],
+            "answer": r["answer"], "confidence": r["confidence"], "review_decision": r["review_decision"],
+            "auto_no_check": checks[r["run_index"]]["auto_no_check"],
+            "answer_changed": bool(baseline) and r is not baseline and r["answer"] != baseline["answer"],
+            "review_changed": bool(baseline) and r is not baseline and r["review_decision"] != baseline["review_decision"],
+            "cells": [sig_index[j].get(mine[d["key"]]) if d["key"] in mine else None for j, d in enumerate(divergence)]})
+
+    notes = check_notes(done, baseline, checks)
+    stability = confidence_stability(done, baseline, spec.get("bands") or {}) if kind == "robustness" else None
+    if stability:
+        notes += stability["notes"]
 
     caveats = ["Associations on one input, not causal proof: runs change one thing (or all readings together) around the baseline."]
     if len(done) < MIN_RUNS_FOR_CONFIDENCE:
@@ -803,11 +898,150 @@ def analyse(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], embe
             "answer": sum(1 for r in others if baseline and r["answer"] != baseline["answer"]),
             "review": sum(1 for r in others if baseline and r["review_decision"] != baseline["review_decision"])},
         "factors": factor_summaries, "step_divergence": divergence, "first_divergent_step": first_divergent_key,
-        "representative_runs": representative, "caveats": caveats, "embedder": embedder_id,
+        "representative_runs": representative, "ribbon_runs": ribbon_runs, "step_numbers": numbers,
+        "caveats": caveats, "embedder": embedder_id, "notes": notes, "confidence_stability": stability,
+        "flagged_runs": {str(i): c for i, c in checks.items() if c["auto_no_check"] or c["synthetic_only"]},
         "agents": agent_divergence(done, baseline),
-        "verdict": robustness_verdict(done, baseline, finished, failed) if kind == "robustness" else None,
+        "verdict": robustness_verdict(done, baseline, finished, failed, checks, stability) if kind == "robustness" else None,
         "grid": grid_summary(done, baseline, spec.get("grid_axes")) if kind == "grid" else None,
     }
+
+
+def run_check(r: Dict[str, Any]) -> Dict[str, Any]:
+    return second_check(r.get("steps") or [], r.get("feedback_rounds"), r.get("review_decision"))
+
+
+def step_numbers(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]]) -> Dict[str, Optional[int]]:
+    """Execution-order number per step key, from the baseline run. Steps the baseline never ran get None
+    (shown as "+": they ran only in other runs). Without a baseline, numbers follow the aligned order."""
+    if baseline and baseline.get("steps"):
+        nums: Dict[str, Optional[int]] = {}
+        for s in sorted(baseline["steps"], key=lambda s: s["position"]):
+            nums.setdefault(s["key"], len(nums) + 1)
+        for r in done:
+            for s in r["steps"]:
+                nums.setdefault(s["key"], None)
+        return nums
+    by_key: Dict[str, List[Tuple[Dict[str, Any], Dict[str, Any]]]] = defaultdict(list)
+    for r in done:
+        for s in r["steps"]:
+            by_key[s["key"]].append((r, s))
+    return {k: i + 1 for i, k in enumerate(step_order(by_key, None))}
+
+
+def step_order(by_key: Dict[str, List[Tuple[Dict[str, Any], Dict[str, Any]]]], baseline: Optional[Dict[str, Any]]) -> List[str]:
+    """Aligned step order: the baseline's own order, with steps it never ran placed right after the baseline
+    step that preceded them in the run where they first appeared. Without a baseline: median position."""
+    base_pos = {s["key"]: s["position"] for s in (baseline or {}).get("steps") or []}
+    if not base_pos:
+        return sorted(by_key, key=lambda k: sorted(s["position"] for _, s in by_key[k])[len(by_key[k]) // 2])
+    sort_key: Dict[str, Tuple[float, int, float]] = {}
+    for k, items in by_key.items():
+        if k in base_pos:
+            sort_key[k] = (base_pos[k], 0, 0)
+            continue
+        r, s = min(items, key=lambda it: (it[1]["position"], it[0]["run_index"]))
+        anchor = max((base_pos[x["key"]] for x in r["steps"] if x["key"] in base_pos and x["position"] < s["position"]), default=-1)
+        sort_key[k] = (anchor, 1, s["position"])
+    return sorted(by_key, key=lambda k: sort_key[k])
+
+
+def _absent_reason(stage: str, key: str, chk: Dict[str, Any]) -> str:
+    if chk["auto_no_check"]:
+        return "skipped — confident enough, auto-approved without a second check"
+    if stage in ("targeted_rag", "targeted_rerun") and not chk["searched"]:
+        return "no extra evidence search in these runs"
+    if stage == "council" and not chk["council"]:
+        return "the council did not meet"
+    if not key.endswith("#1"):
+        return "fewer rounds in these runs"
+    return "not reached in these runs"
+
+
+def _with_unit(sensor: str, v: float) -> str:
+    return f"{v:g} {_unit(sensor)}".rstrip()
+
+
+def _pct(v: Optional[float]) -> str:
+    return "—" if v is None else f"{round(v * 100)}%"
+
+
+def check_notes(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], checks: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Runs approved without a second look, and runs whose second look found only synthetic evidence."""
+    notes = []
+    auto = [r for r in done if checks[r["run_index"]]["auto_no_check"]]
+    if auto:
+        n = len(auto)
+        notes.append({"id": "auto_no_check", "severity": "high", "run_indexes": [r["run_index"] for r in auto],
+                      "text": f"{n} run{' was' if n == 1 else 's were'} auto-approved without a second check (no extra evidence "
+                              f"search, no council debate): " + "; ".join(f"{r['label']}: {r['answer']} {_pct(r['confidence'])}" for r in auto[:4])
+                              + ("…" if n > 4 else "") + "."})
+    syn = [r for r in done if checks[r["run_index"]]["synthetic_only"]]
+    if syn:
+        varied = [r for r in syn if r is not baseline]
+        changed = [r for r in varied if baseline and r["answer"] != baseline["answer"]]
+        n = len(varied)
+        base_txt = " (the baseline's own double-check too)" if baseline in syn else ""
+        if not n:
+            text = "The baseline's double-check found only synthetic evidence."
+        elif n >= 3:
+            rest = [r for r in done if r is not baseline and r not in varied]
+            rest_rate = (sum(1 for r in rest if baseline and r["answer"] != baseline["answer"]) / len(rest)) if rest else None
+            text = (f"{n} runs whose double-check found only synthetic evidence{base_txt}; {len(changed)} of them changed the answer"
+                    + (f" (vs {rest_rate:.0%} of the other runs)" if rest_rate is not None else "") + ".")
+        else:
+            what = ("it changed the answer" if n == 1 and changed else "it kept the answer" if n == 1 else
+                    "both changed the answer" if len(changed) == 2 else "one changed the answer" if changed else "neither changed the answer")
+            text = (f"Suggestive ({n} run{'s' if n > 1 else ''}): the double-check found only synthetic evidence{base_txt}; {what}. "
+                    "Too few runs to tell whether the two are linked.")
+        notes.append({"id": "double_check_synthetic", "severity": "medium", "run_indexes": [r["run_index"] for r in syn], "text": text})
+    return notes
+
+
+def confidence_stability(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], bands: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Robustness: how far confidence moves under tolerance-sized changes, and nudges that cross a normal-band edge."""
+    if not baseline or baseline.get("confidence") is None:
+        return None
+    base_read = parse_readings(baseline["question"])
+    tol = [r for r in done if r["group"] == "tolerance" and r["factor"] in base_read and r["confidence"] is not None]
+    joint = [r for r in done if r["group"] == "joint" and r["confidence"] is not None]
+    confs = [r["confidence"] for r in tol + joint] + [baseline["confidence"]]
+    out: Dict[str, Any] = {"range": [round(min(confs), 3), round(max(confs), 3)], "notes": [], "largest": None, "crossings": []}
+    out["range_text"] = f"confidence {round(min(confs) * 100)}–{round(max(confs) * 100)}% under normal sensor error"
+
+    def nudge(r):
+        b = base_read[r["factor"]]
+        m = re.search(r"([+−-])\s*(\d+(?:\.\d+)?)%", str(r["label"]))      # the designed tolerance, e.g. '+3%'
+        p = float(m.group(2)) if m else (round(abs(r["value"] - b) / b * 100, 1) if b else 0)
+        return f"{SENSOR_SPECS[r['factor']]['label']} {'+' if r['value'] > b else '−'}{p:g}%", p
+
+    for r in tol:
+        band = bands.get(r["factor"])
+        b = base_read[r["factor"]]
+        if band and band_status(b, tuple(band)) != band_status(r["value"], tuple(band)):
+            edge = band[1] if max(b, r["value"]) > band[1] >= min(b, r["value"]) else band[0]
+            name, _ = nudge(r)
+            out["crossings"].append({"run_index": r["run_index"], "label": r["label"], "factor": r["factor"], "edge": _sig3(edge),
+                                     "text": f"{name} crosses the normal limit ({_with_unit(r['factor'], _sig3(edge))}) — confidence {_pct(baseline['confidence'])} → {_pct(r['confidence'])}"})
+    if tol:
+        big = max(tol, key=lambda r: abs(r["confidence"] - baseline["confidence"]))
+        d = big["confidence"] - baseline["confidence"]
+        name, p = nudge(big)
+        out["largest"] = {"run_index": big["run_index"], "label": big["label"], "factor": big["factor"], "pct": p,
+                          "from": baseline["confidence"], "to": big["confidence"], "delta": round(d, 3)}
+        if abs(d) >= 0.10:
+            cross = next((c for c in out["crossings"] if c["run_index"] == big["run_index"]), None)
+            out["notes"].append({"id": "confidence_unstable", "severity": "medium", "run_indexes": [big["run_index"]],
+                                 "text": f"Confidence is unstable: a {p:g}% change in {SENSOR_SPECS[big['factor']]['label'].lower()} moved it "
+                                         f"{round(abs(d) * 100)} points ({_pct(baseline['confidence'])} → {_pct(big['confidence'])})"
+                                         + (f"; that change crosses the normal limit ({_with_unit(big['factor'], cross['edge'])})" if cross else "")
+                                         + ". Read it as low/medium/high, not an exact figure."})
+    said = {n["run_indexes"][0] for n in out["notes"] if "normal limit" in n["text"]}
+    for c in out["crossings"]:
+        if c["run_index"] in said:
+            continue
+        out["notes"].append({"id": "band_crossing", "severity": "info", "run_indexes": [c["run_index"]], "text": c["text"] + "."})
+    return out
 
 
 def grid_summary(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], axes: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -885,49 +1119,80 @@ def agent_divergence(done: List[Dict[str, Any]], baseline: Optional[Dict[str, An
 THIN_MARGIN = 0.10       # runner-up within this score of the leader: the baseline itself is a coin-flip
 
 
+VERDICT_VERSION = 3       # bump when the verdict's wording or rules change; older frozen verdicts are re-derived for display
+
+
+def _runs(n: int) -> str:
+    return f"{n} run{'' if n == 1 else 's'}"
+
+
+def _nudge_name(r: Dict[str, Any]) -> str:
+    """'Vibration +20% → 0.66' → 'vibration +20%' (the change, without the resulting value)."""
+    head = str(r["label"]).split(" → ")[0]
+    return head[:1].lower() + head[1:]
+
+
 def robustness_verdict(done: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], finished: bool = True,
-                       failed: int = 0) -> Optional[Dict[str, Any]]:
+                       failed: int = 0, checks: Optional[Dict[int, Dict[str, Any]]] = None,
+                       stability: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     if not baseline:
         return None
     if not finished:
-        return {"level": "incomplete", "text": f"Still running: {len(done)} run(s) finished so far. No verdict until all runs finish."}
+        return {"level": "incomplete", "text": f"Still running: {_runs(len(done))} finished so far. No verdict until all runs finish.",
+                "v": VERDICT_VERSION}
+    checks = checks if checks is not None else {r["run_index"]: run_check(r) for r in done}
     core = [r for r in done if r is not baseline and r["group"] in ("tolerance", "joint", "evidence")]
     wide = [r for r in done if r["group"] == "wide"]
     flips = [r for r in core if r["answer"] != baseline["answer"]]
+    wide_flips = [r for r in wide if r["answer"] != baseline["answer"]]
+    auto_flips = [r for r in done if r is not baseline and r["answer"] != baseline["answer"] and checks[r["run_index"]]["auto_no_check"]]
     review = [r for r in core if r["review_decision"] != baseline["review_decision"]]
     confs = [r["confidence"] or 0 for r in core + [baseline]]
     lo, hi = min(confs), max(confs)
     margin = (baseline.get("outcome") or {}).get("margin")
     thin = margin is not None and margin < THIN_MARGIN
-    level = "fragile" if flips else ("sensitive" if review or (hi - lo) >= 0.15 or thin else "stable")
+    level = "fragile" if flips else ("sensitive" if review or (hi - lo) >= 0.15 or thin or auto_flips else "stable")
     sensor_flips = [r for r in flips if r["group"] in ("tolerance", "joint")]
     evidence_flips = [r for r in flips if r["group"] == "evidence"]
     if level == "fragile":
         parts = []
         if sensor_flips:
-            parts.append(f"a change within normal sensor error gives a different diagnosis in {len(sensor_flips)} run(s) "
+            parts.append(f"a change within normal sensor error gives a different diagnosis in {_runs(len(sensor_flips))} "
                          f"({'; '.join(f'{r['label']} → {r['answer']}' for r in sensor_flips[:2])})")
         if evidence_flips:
-            parts.append(f"leaving out one cited evidence record changes it in {len(evidence_flips)} run(s)")
-        text = "Not robust: " + ", and ".join(parts) + ". Confirm with an inspection before acting."
+            parts.append(f"leaving out one cited evidence record changes it in {_runs(len(evidence_flips))}")
+        text = "Not robust: " + ", and ".join(parts) + "."
     else:
         reasons = []
         if review:
-            reasons.append(f"the review decision changed in {len(review)} run(s)")
+            reasons.append(f"the review decision changed in {_runs(len(review))}")
         if hi - lo >= 0.15:
             reasons.append(f"confidence ranged {lo:.0%}–{hi:.0%}")
         if thin:
             reasons.append(f"the runner-up is only {margin:.2f} behind the leading diagnosis")
-        text = (f"Same diagnosis in all {len(core)} disturbed runs, but " + " and ".join(reasons) + "."
-                if level == "sensitive" else
-                f"Same diagnosis and review decision in all {len(core)} disturbed runs; confidence {lo:.0%}–{hi:.0%}.")
+        text = (f"Stable under normal sensor error: same diagnosis in all {len(core)} disturbed runs"
+                + (", but " + " and ".join(reasons) if reasons else
+                   ("" if review else f" and the same review decision; confidence {lo:.0%}–{hi:.0%}")) + ".")
+    if wide_flips:
+        names = list(dict.fromkeys(_nudge_name(r) for r in wide_flips))
+        text += (f" Larger changes (±20–40%) to out-of-range readings change the diagnosis at {', '.join(names[:4])}"
+                 f"{'…' if len(names) > 4 else ''} ({len(wide_flips)} of {len(wide)} runs).")
+    if auto_flips:                   # the most important fact leads the text
+        n = len(auto_flips)
+        text = (f"{'A changed answer was' if n == 1 else f'{n} changed answers were'} auto-approved without a second check: "
+                + "; ".join(f"{_nudge_name(r)} → {r['answer']} {_pct(r['confidence'])}" for r in auto_flips[:3]) + ". " + text)
+    if level == "fragile":
+        text += " Confirm with an inspection before acting."
     nearest = []
     for r in sorted(wide, key=lambda r: abs((r["value"] or 0) - parse_readings(baseline["question"]).get(r["factor"], 0))):
         if r["answer"] != baseline["answer"] and r["factor"] not in {n["factor"] for n in nearest}:
             nearest.append({"factor": r["factor"], "label": r["label"], "answer": r["answer"], "run_index": r["run_index"]})
-    return {"level": level, "text": text, "tested": len(core), "failed": failed, "answer_flips": len(flips),
+    return {"v": VERDICT_VERSION, "level": level, "text": text, "tested": len(core), "failed": failed, "answer_flips": len(flips),
             "review_flips": len(review), "confidence_range": [round(lo, 3), round(hi, 3)], "baseline_margin": margin,
-            "wide_runs": len(wide), "nearest_flips": nearest,
+            "wide_runs": len(wide), "wide_flips": len(wide_flips), "nearest_flips": nearest,
+            "auto_approved_flips": [{"run_index": r["run_index"], "label": r["label"], "answer": r["answer"],
+                                     "confidence": r["confidence"]} for r in auto_flips],
+            "confidence_text": (stability or {}).get("range_text"),
             "flipping_runs": [{"run_index": r["run_index"], "label": r["label"], "answer": r["answer"]} for r in flips]}
 
 

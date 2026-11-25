@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ChevronRight, Flag } from 'lucide-react'
+import { AlertTriangle, ChevronRight, Flag } from 'lucide-react'
 import { cx } from '../ui'
 import { ReviewDecision } from '../primitives'
 
@@ -35,8 +35,21 @@ export function AnswerChip({ answer, color, className }) {
 const fmtVal = (v) => (typeof v === 'number' ? Number(v).toLocaleString(undefined, { maximumFractionDigits: 3 }) : String(v))
 const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`)
 
+/** ~7 evenly spaced values strictly between a and b, rounded to the sensor's resolution. */
+export function refineValues(a, b, decimals, n = 7) {
+  const lo = Math.min(a, b), hi = Math.max(a, b)
+  const f = 10 ** (decimals ?? 3)
+  const out = []
+  for (let i = 1; i <= n; i++) {
+    const v = Math.round((lo + ((hi - lo) * i) / (n + 1)) * f) / f
+    if (v > lo && v < hi && !out.includes(v)) out.push(v)
+  }
+  return out
+}
+
 /** One row per factor: every tried value in order, coloured by the answer it produced. */
-export function FactorSweeps({ factors, colorOf, onOpenRun }) {
+export function FactorSweeps({ factors, colorOf, onOpenRun, onRefine, baselineAnswer }) {
+  const [refining, setRefining] = useState(null)
   if (!factors?.length) return <p className="text-[13px] text-muted">No varied runs have finished yet.</p>
   return (
     <div className="grid gap-x-6 gap-y-4 xl:grid-cols-2">
@@ -78,9 +91,26 @@ export function FactorSweeps({ factors, colorOf, onOpenRun }) {
           </div>
           {f.transitions?.length > 0 && (
             <ul className="mt-1.5 space-y-0.5 text-[12px] text-muted">
-              {f.transitions.map((t, i) => (
-                <li key={i}>Between <b className="text-ink tabular-nums">{fmtVal(t.from_value)}</b> and <b className="text-ink tabular-nums">{fmtVal(t.to_value)}</b>: {t.from_answer} → <b className="text-ink">{t.to_answer}</b></li>
-              ))}
+              {f.transitions.map((t, i) => {
+                // only where the baseline's diagnosis gives way to another one: that is the boundary worth locating
+                const canRefine = f.is_sensor && onRefine && (!baselineAnswer || t.from_answer === baselineAnswer || t.to_answer === baselineAnswer)
+                const vals = canRefine ? refineValues(t.from_value, t.to_value, f.decimals) : []
+                const key = `${f.factor}:${t.from_value}:${t.to_value}`
+                return (
+                  <li key={i} className="flex flex-wrap items-baseline gap-x-2">
+                    <span>Between <b className="text-ink tabular-nums">{fmtVal(t.from_value)}</b> and <b className="text-ink tabular-nums">{fmtVal(t.to_value)}</b>: {t.from_answer} → <b className="text-ink">{t.to_answer}</b></span>
+                    {canRefine && (
+                      <button type="button" disabled={!vals.length || refining === key}
+                        onClick={async () => { setRefining(key); try { await onRefine(f, t, vals) } finally { setRefining(null) } }}
+                        title={vals.length ? `Runs ${vals.length} values in between (${vals.map(fmtVal).join(', ')}) to find where the model’s answer switches — not a physical limit` : 'These values are already next to each other at the sensor’s resolution'}
+                        className="rounded border border-line px-1.5 py-px text-[11.5px] font-medium text-primary-700 hover:bg-well focus-ring disabled:opacity-50">
+                        {refining === key ? 'Starting…' : 'Find the exact point'}
+                      </button>
+                    )}
+                  </li>
+                )
+              })}
+              {f.is_sensor && onRefine && <li className="text-[11px]">“Find the exact point” narrows down where the model’s answer switches (not a physical limit).</li>}
             </ul>
           )}
         </div>
@@ -106,22 +136,35 @@ export const stepName = (s) => {
   const label = [base, who, verb && VERB[verb] !== undefined ? VERB[verb] : verb].filter(Boolean).join(' · ')
   return n > 1 ? `${label} (round ${n})` : label
 }
+/** "3. Hypothesis scoring" — the step's execution order (baseline order; extra steps continue the count). */
+export const numberedName = (s, num) => (num ? `${num}. ${stepName(s)}` : num === null ? `+ ${stepName(s)} (not in the baseline)` : stepName(s))
+// numbered = its order in the baseline run; "+" = a step only other runs made (the baseline never ran it)
+const StepNo = ({ n }) => (n ? <span className="mr-1 tabular-nums text-slate-400">{n}.</span>
+  : n === null ? <span className="mr-1 font-semibold text-warning-700" title="The baseline never ran this step; only other runs did">+</span> : null)
+const plural = (n, w, p) => `${n} ${n === 1 ? w : p || `${w}s`}`
+
+
+function AnswerCounts({ answers, colorOf }) {
+  return <div className="flex flex-wrap gap-x-3 gap-y-0.5">{Object.entries(answers || {}).sort((a, b) => b[1] - a[1]).map(([a, n]) => <span key={a} className="tabular-nums"><AnswerChip answer={`${a} ×${n}`} color={colorOf(a)} /></span>)}</div>
+}
 
 /** Which pipeline steps made a different decision across runs, aligned by step identity. */
 export function StepDivergence({ steps, firstKey, colorOf, total }) {
   const [open, setOpen] = useState(firstKey)
   const [onlyChanged, setOnlyChanged] = useState(true)
-  const signal = (s) => s.changed_runs > 0 && s.missing_runs < total / 2
+  const signal = (s) => s.changed_runs > 0
   const shown = onlyChanged ? steps.filter(signal) : steps
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted">
         <span className="inline-flex items-center gap-1.5"><span className="h-2 w-4 rounded-sm bg-warning-500" />linked to the final answer</span>
         <span className="inline-flex items-center gap-1.5"><span className="h-2 w-4 rounded-sm bg-slate-300" />changed, not linked</span>
-        <label className="ml-auto inline-flex items-center gap-1.5 cursor-pointer">
-          <input type="checkbox" checked={onlyChanged} onChange={(e) => setOnlyChanged(e.target.checked)} className="accent-primary-700" />
-          Only steps that changed in most runs ({steps.filter(signal).length} of {steps.length})
-        </label>
+        <div role="radiogroup" aria-label="Which steps to show" className="ml-auto inline-flex rounded-md border border-line p-0.5">
+          {[[true, `Steps where at least one run decided differently (${steps.filter(signal).length} of ${steps.length})`], [false, `Show all steps (${steps.length})`]].map(([v, l]) => (
+            <button key={String(v)} type="button" role="radio" aria-checked={onlyChanged === v} onClick={() => setOnlyChanged(v)}
+              className={cx('rounded px-2 py-0.5 font-medium focus-ring', onlyChanged === v ? 'bg-ink text-surface' : 'text-muted hover:text-ink')}>{l}</button>
+          ))}
+        </div>
       </div>
       <ol className="divide-y divide-line rounded-lg border border-line bg-surface">
         {shown.map((s) => {
@@ -130,9 +173,10 @@ export function StepDivergence({ steps, firstKey, colorOf, total }) {
           return (
             <li key={s.key}>
               <button type="button" onClick={() => setOpen(isOpen ? null : s.key)} aria-expanded={isOpen}
-                className="grid w-full grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2 text-left hover:bg-well focus-ring sm:grid-cols-[16px_minmax(0,220px)_minmax(0,1fr)_auto]">
+                className="grid w-full grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2 text-left hover:bg-well focus-ring sm:grid-cols-[16px_minmax(0,300px)_minmax(0,1fr)_auto]">
                 <ChevronRight size={14} className={cx('text-muted transition-transform', isOpen && 'rotate-90')} />
-                <span className="truncate text-[12.5px] font-medium text-ink">
+                <span className="text-[12.5px] font-medium leading-snug text-ink">
+                  <StepNo n={s.number} />
                   {s.key === firstKey && <Flag size={12} className="mr-1 inline text-danger-600" aria-label="First step that diverges with the answer" />}
                   {stepName(s)}
                 </span>
@@ -140,14 +184,18 @@ export function StepDivergence({ steps, firstKey, colorOf, total }) {
                   <span className={cx('block h-full rounded-full', s.answer_linked ? 'bg-warning-500' : 'bg-slate-300')} style={{ width: `${Math.max(frac * 100, s.changed_runs ? 3 : 0)}%` }} />
                 </span>
                 <span className="text-[11.5px] tabular-nums text-muted whitespace-nowrap">
-                  {s.changed_runs}/{total} changed{s.missing_runs ? `, absent in ${s.missing_runs}` : ''}
+                  {s.changed_runs}/{total} changed{s.missing_runs ? `, did not run in ${s.missing_runs}` : ''}
                 </span>
               </button>
               {isOpen && (
                 <div className="px-3 pb-3 pl-10">
-                  <p className="text-[12px] text-muted">Baseline decision: <span className="text-ink">{s.baseline_signature}</span>
-                    {s.answer_linked && <> — runs that took the same path here mostly reached the same answer ({pct(s.answer_link_score)}).</>}
-                    {s.missing_runs > 0 && <> This step did not happen at all in {s.missing_runs} run(s).</>}</p>
+                  <p className="text-[12px] text-muted">{s.number === null ? 'Most common decision' : 'Baseline decision'}: <span className="text-ink">{s.baseline_signature}</span>.
+                    {s.missing_runs > 0 && <> This step did not happen at all in {plural(s.missing_runs, 'run')}.</>}
+                    {s.number === null && <> The baseline never ran this step.</>}</p>
+                  {s.answer_linked && s.link_detail && (() => {
+                    const d = s.link_detail
+                    return <p className="mt-0.5 text-[12px] text-muted">Linked to the answer: {pct(d.rate)} of the {d.runs} runs that decided “<span className="text-ink">{d.signature}</span>” here{d.is_baseline ? ' (as the baseline did)' : ''} reached <span className="text-ink">{d.answer}</span>, vs {pct(d.base_rate)} across all runs.</p>
+                  })()}
                   <table className="mt-2 w-full text-[12px]">
                     <thead><tr className="text-left text-muted"><th className="py-1 pr-3 font-medium">Decision at this step</th><th className="py-1 pr-3 font-medium">Runs</th><th className="py-1 font-medium">Final answers</th></tr></thead>
                     <tbody>
@@ -155,10 +203,25 @@ export function StepDivergence({ steps, firstKey, colorOf, total }) {
                         <tr key={v.signature} className="border-t border-line align-top">
                           <td className="py-1.5 pr-3 text-ink">{v.signature}</td>
                           <td className="py-1.5 pr-3 tabular-nums">{v.count}</td>
-                          <td className="py-1.5"><div className="flex flex-wrap gap-x-3 gap-y-0.5">{Object.entries(v.answers).map(([a, n]) => <span key={a} className="tabular-nums"><AnswerChip answer={`${a} ×${n}`} color={colorOf(a)} /></span>)}</div></td>
+                          <td className="py-1.5"><AnswerCounts answers={v.answers} colorOf={colorOf} /></td>
+                        </tr>
+                      ))}
+                      {s.other_variants && (
+                        <tr className="border-t border-line align-top">
+                          <td className="py-1.5 pr-3 italic text-muted">Other decisions ({s.other_variants.signatures} kinds)</td>
+                          <td className="py-1.5 pr-3 tabular-nums">{s.other_variants.count}</td>
+                          <td className="py-1.5"><AnswerCounts answers={s.other_variants.answers} colorOf={colorOf} /></td>
+                        </tr>
+                      )}
+                      {(s.absent || []).map((g) => (
+                        <tr key={g.reason} className="border-t border-dashed border-line align-top">
+                          <td className="py-1.5 pr-3 italic text-muted">Did not run: {g.reason}</td>
+                          <td className="py-1.5 pr-3 tabular-nums">{g.count}</td>
+                          <td className="py-1.5"><AnswerCounts answers={g.answers} colorOf={colorOf} /></td>
                         </tr>
                       ))}
                     </tbody>
+                    <tfoot><tr className="border-t border-line text-muted"><td className="py-1 pr-3">All runs</td><td className="py-1 pr-3 tabular-nums">{total}</td><td /></tr></tfoot>
                   </table>
                 </div>
               )}
@@ -170,36 +233,78 @@ export function StepDivergence({ steps, firstKey, colorOf, total }) {
   )
 }
 
-/** Step ribbons: one row per representative run, one cell per aligned step; dark cells differ from the baseline. */
-export function StepRibbons({ runs, divergence, colorOf }) {
+/** Step ribbons: one row per run (one example per diagnosis, or all runs), one cell per aligned step; dark cells differ from the baseline. */
+export function StepRibbons({ runs, allRuns, divergence, colorOf }) {
   const [hover, setHover] = useState(null)
+  const [showAll, setShowAll] = useState(false)
   const keys = divergence.map((d) => d.key)
-  const base = runs[0]
-  const baseSig = Object.fromEntries((base?.steps || []).map((s) => [s.key, s.signature]))
+  const num = Object.fromEntries(divergence.map((d) => [d.key, d.number]))
+  const rows = useMemo(() => {
+    if (showAll && allRuns?.length) {
+      const norm = allRuns.map((r) => ({ ...r, sig: Object.fromEntries(divergence.map((d, j) => [d.key, r.cells[j] == null ? undefined : d.signatures[r.cells[j]]]).filter(([, v]) => v !== undefined)) }))
+      const base = norm.find((r) => r.is_baseline)
+      const count = {}
+      norm.forEach((r) => { count[r.answer] = (count[r.answer] || 0) + 1 })
+      // baseline row, then the changed answers (groups holding an auto-approved run first), then runs that kept the baseline answer
+      const hasAuto = {}
+      norm.forEach((r) => { if (r.auto_no_check) hasAuto[r.answer] = true })
+      const rank = (a) => (base && a === base.answer ? 1e9 : (hasAuto[a] ? -1e6 : 0) - count[a])
+      return norm.sort((x, y) => (y.is_baseline - x.is_baseline) || (rank(x.answer) - rank(y.answer)) || String(x.answer).localeCompare(String(y.answer))
+        || ((y.auto_no_check ? 1 : 0) - (x.auto_no_check ? 1 : 0)) || (x.run_index - y.run_index))
+    }
+    return (runs || []).map((r, i) => ({ ...r, is_baseline: i === 0, sig: Object.fromEntries(r.steps.map((s) => [s.key, s.signature])) }))
+  }, [showAll, allRuns, runs, divergence])
+  const base = rows.find((r) => r.is_baseline) || rows[0]
+  const baseSig = base?.sig || {}
+  const counts = {}
+  rows.forEach((r) => { counts[r.answer] = (counts[r.answer] || 0) + 1 })
+  const cellsOf = (r) => keys.map((k) => {
+    const s = r.sig[k]
+    const diff = s !== undefined && r !== base && baseSig[k] !== undefined && s !== baseSig[k]
+    const extra = s !== undefined && baseSig[k] === undefined && r !== base
+    const name = numberedName({ key: k }, num[k])
+    return (
+      <span key={k} onMouseEnter={() => setHover({ k, s, r })} onMouseLeave={() => setHover(null)}
+        className={cx('h-6 min-w-[8px] flex-1 rounded-[2px]', s === undefined ? 'bg-transparent border border-dashed border-line' : diff ? 'bg-ink' : extra ? 'bg-warning-500' : 'bg-primary-200')}
+        title={s !== undefined ? `${name}: ${s}` : `${name}: did not run`} />
+    )
+  })
   return (
     <div>
-      <div className="space-y-2">
-        {runs.map((r) => {
-          const sig = Object.fromEntries(r.steps.map((s) => [s.key, s]))
+      {allRuns?.length > (runs || []).length && (
+        <label className="mb-3 inline-flex cursor-pointer items-center gap-1.5 text-[12px] text-muted">
+          <input type="checkbox" className="accent-primary-700" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} />
+          Show all runs ({allRuns.length}) — grouped by diagnosis; otherwise one example per diagnosis
+        </label>
+      )}
+      <div className="grid grid-cols-1 gap-1 sm:grid-cols-[200px_minmax(0,1fr)] sm:gap-3" aria-hidden>
+        <span className="hidden text-[10.5px] text-muted sm:block">Step no.</span>
+        <div className="flex gap-px">
+          {keys.map((k, j) => {
+            const n = num[k]
+            const last = Math.max(...keys.map((x) => num[x] || 0))
+            return <span key={k} className={cx('min-w-[8px] flex-1 overflow-visible whitespace-nowrap text-[10px] tabular-nums leading-3', n == null ? 'font-semibold text-warning-700' : 'text-slate-400')}>
+              {n == null ? (j === 0 || num[keys[j - 1]] != null ? '+' : '') : (n === 1 || n % 5 === 0 || n === last ? n : '')}</span>
+          })}
+        </div>
+      </div>
+      <div className="mt-1 space-y-2">
+        {rows.map((r, i) => {
+          const newGroup = showAll && (i === 0 || rows[i - 1].answer !== r.answer || rows[i - 1].is_baseline)
+          const changed = r.answer_changed || r.review_changed
           return (
-            <div key={r.run_index} className="grid grid-cols-1 gap-1 sm:grid-cols-[200px_minmax(0,1fr)] sm:items-center sm:gap-3">
-              <div className="min-w-0">
-                <p className="truncate text-[12.5px] font-medium text-ink">{r.label}</p>
-                <AnswerChip answer={`${r.answer} · ${pct(r.confidence)}`} color={colorOf(r.answer)} className="text-muted" />
+            <Fragment key={r.run_index}>
+              {newGroup && !r.is_baseline && <p className="pt-1 text-[11.5px] font-medium text-muted"><AnswerChip answer={`${r.answer} · ${counts[r.answer]} run${counts[r.answer] === 1 ? '' : 's'}`} color={colorOf(r.answer)} /></p>}
+              <div className={cx('grid grid-cols-1 gap-1 sm:grid-cols-[200px_minmax(0,1fr)] sm:items-center sm:gap-3', showAll && changed && 'rounded-md bg-warning-50/70 ring-1 ring-warning-500/40')}>
+                <div className="min-w-0 pl-1">
+                  <p className="truncate text-[12.5px] font-medium text-ink">{r.label}{r.is_baseline && <span className="ml-1.5 text-[10.5px] uppercase tracking-wide text-muted">baseline</span>}</p>
+                  <AnswerChip answer={`${r.answer} · ${pct(r.confidence)}`} color={colorOf(r.answer)} className="text-muted" />
+                  {showAll && changed && <p className="text-[10.5px] font-medium text-warning-700">{[r.answer_changed && 'answer changed', r.review_changed && 'review changed'].filter(Boolean).join(', ')}</p>}
+                  {r.auto_no_check && <p className="text-[10.5px] font-medium text-danger-700">auto-approved, no second check</p>}
+                </div>
+                <div className="flex gap-px overflow-x-auto">{cellsOf(r)}</div>
               </div>
-              <div className="flex gap-px overflow-x-auto">
-                {keys.map((k) => {
-                  const s = sig[k]
-                  const diff = s && base && r !== base && baseSig[k] !== undefined && s.signature !== baseSig[k]
-                  const extra = s && baseSig[k] === undefined && r !== base
-                  return (
-                    <span key={k} onMouseEnter={() => setHover({ k, s, r })} onMouseLeave={() => setHover(null)}
-                      className={cx('h-6 min-w-[8px] flex-1 rounded-[2px]', !s ? 'bg-transparent border border-dashed border-line' : diff ? 'bg-ink' : extra ? 'bg-warning-500' : 'bg-primary-200')}
-                      title={s ? `${stepName({ key: k })}: ${s.signature}` : `${stepName({ key: k })}: did not run`} />
-                  )
-                })}
-              </div>
-            </div>
+            </Fragment>
           )
         })}
       </div>
@@ -208,9 +313,10 @@ export function StepRibbons({ runs, divergence, colorOf }) {
         <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-[2px] bg-ink" />different decision</span>
         <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-[2px] bg-warning-500" />step the baseline never ran</span>
         <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-[2px] border border-dashed border-line" />step skipped</span>
+        {showAll && <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-[2px] bg-warning-50 ring-1 ring-warning-500/40" />answer or review changed vs baseline</span>}
       </div>
       <p className="mt-2 min-h-[20px] text-[12px] text-ink" aria-live="polite">
-        {hover ? <><b>{stepName({ key: hover.k })}</b> in “{hover.r.label}”: {hover.s ? hover.s.signature : 'did not run'}</> : <span className="text-muted">Hover a cell to see the decision made at that step.</span>}
+        {hover ? <><b>{numberedName({ key: hover.k }, num[hover.k])}</b> in “{hover.r.label}”: {hover.s !== undefined ? hover.s : 'did not run'}</> : <span className="text-muted">Hover a cell to see the decision made at that step. Columns follow the baseline’s order (numbers = its step numbers); “+” marks steps only other runs made, placed where they ran.</span>}
       </p>
     </div>
   )
@@ -241,10 +347,14 @@ export function RunsTable({ runs, colorOf, selected, onToggle, highlight }) {
               <td className="px-3 py-1.5 text-ink">
                 {r.label}{r.is_baseline && <span className="ml-1.5 text-[10.5px] uppercase tracking-wide text-muted">baseline</span>}
                 {r.status !== 'done' && <span className={cx('ml-2 text-[11px]', r.status === 'failed' ? 'text-danger-700' : 'text-muted')}>{r.status}{r.error ? `: ${r.error}` : ''}</span>}
+                {r.check?.auto_no_check && <span className="ml-2 rounded bg-danger-50 px-1 text-[10.5px] font-medium text-danger-700" title="The review gate approved it with no extra evidence search and no council debate">auto-approved, no second check</span>}
+                {r.check?.synthetic_only && <span className="ml-2 rounded bg-warning-50 px-1 text-[10.5px] font-medium text-warning-700" title="The extra evidence search found only synthetic records">double-check: synthetic only</span>}
               </td>
               <td className="px-3 py-1.5">{r.answer ? <AnswerChip answer={r.answer} color={colorOf(r.answer)} /> : '—'}</td>
               <td className="px-3 py-1.5 tabular-nums">{pct(r.confidence)}</td>
-              <td className="px-3 py-1.5">{r.review_decision ? <ReviewDecision decision={r.review_decision} variant="inline" /> : '—'}</td>
+              <td className="px-3 py-1.5">{r.check?.auto_no_check
+                ? <span className="inline-flex items-center gap-1 text-[12px] font-medium text-warning-700" title="Auto-resolved, but with no extra evidence search and no council debate"><AlertTriangle size={12} aria-hidden />Auto-resolve, unchecked</span>
+                : r.review_decision ? <ReviewDecision decision={r.review_decision} variant="inline" /> : '—'}</td>
               <td className="px-3 py-1.5">{r.trace_id ? <Link to={`/traces/${r.trace_id}`} className="font-medium text-primary-700 underline underline-offset-2">Open</Link> : '—'}</td>
             </tr>
           ))}
@@ -260,10 +370,17 @@ const STATE_STYLE = {
 const agentName = (k, fallback) => AGENT_SHORT[k] || fallback || k
 
 /** Agent × run matrix for the whole experiment: each agent's finding per run; outlined cells moved away from the baseline. */
-export function AgentMatrix({ agents, runs, colorOf, onPick }) {
+export function AgentMatrix({ agents, runs, colorOf, onPick, stepNumbers }) {
   const [hover, setHover] = useState(null)
   if (!agents?.length) return <p className="text-[13px] text-muted">No agent data recorded for these runs.</p>
   const label = Object.fromEntries(runs.map((r) => [r.run_index, r.label]))
+  // the step number at which each agent first acts (baseline order), so rows match the Step by step tab
+  const firstStep = {}, firstKey = {}
+  Object.entries(stepNumbers || {}).forEach(([k, n]) => {
+    const ag = k.split('#')[0].split(':')[1]
+    if (ag && n != null && (firstStep[ag] == null || n < firstStep[ag])) { firstStep[ag] = n; firstKey[ag] = k }
+  })
+  const firstText = (ag) => (firstStep[ag] ? `first acts at step ${firstStep[ag]} · ${stepName({ key: firstKey[ag] })}` : '')
   return (
     <div>
       <div className="overflow-x-auto">
@@ -281,7 +398,9 @@ export function AgentMatrix({ agents, runs, colorOf, onPick }) {
           <tbody>
             {agents.map((a) => (
               <tr key={a.agent}>
-                <td className="sticky left-0 bg-canvas py-0.5 pr-3 font-medium text-ink whitespace-nowrap">{agentName(a.agent, a.name)}</td>
+                <td className="sticky left-0 bg-canvas py-0.5 pr-3 whitespace-nowrap" title={firstText(a.agent) || undefined}>
+                  <span className="font-medium text-ink">{agentName(a.agent, a.name)}</span>
+                  {firstStep[a.agent] && <span className="ml-1.5 text-[11px] tabular-nums text-muted">from step {firstStep[a.agent]}</span>}</td>
                 <td className="py-0.5 pr-3 tabular-nums text-muted whitespace-nowrap">{a.changed_runs}/{a.cells.length - 1}</td>
                 {a.cells.map((c) => (
                   <td key={c.run_index} className="px-px py-0.5">
@@ -297,9 +416,9 @@ export function AgentMatrix({ agents, runs, colorOf, onPick }) {
         </table>
       </div>
       <p className="mt-2 min-h-[20px] text-[12px] text-ink" aria-live="polite">
-        {hover ? <><b>{agentName(hover.a.agent, hover.a.name)}</b> in “{label[hover.c.run_index]}”: {hover.c.finding || 'did not run'}
+        {hover ? <><b>{agentName(hover.a.agent, hover.a.name)}</b>{firstText(hover.a.agent) && <span className="text-muted"> ({firstText(hover.a.agent)})</span>} in “{label[hover.c.run_index]}”: {hover.c.finding || 'did not run'}
           {hover.c.confidence != null && ` (${pct(hover.c.confidence)})`}; final answer {hover.c.answer}{hover.c.changed ? ' — changed from baseline' : ''}</>
-          : <span className="text-muted">Colour = the agent's finding. Outlined = different from its baseline finding. Hover for details, click to compare that run with the baseline.</span>}
+          : <span className="text-muted">Colour = the agent's finding. Outlined = different from its baseline finding. “From step n” = the baseline step where the agent first acts (same numbers as Step by step). Hover for details, click to compare that run with the baseline.</span>}
       </p>
     </div>
   )
@@ -327,7 +446,7 @@ export function CompareView({ data, colorOf }) {
       <div className="grid gap-2 sm:grid-cols-2"><Head r={data.a} tag="A" /><Head r={data.b} tag="B" /></div>
       <div className="mt-3 rounded-lg border border-line bg-well/60 px-3 py-2 text-[12.5px] text-ink">
         {data.first_divergence ? <>Reasoning first differs at <b>{stepName({ key: data.first_divergence })}</b>
-          {' '}(step {(data.steps.findIndex((s) => s.key === data.first_divergence)) + 1} of {data.steps.length}); {data.summary.different} step(s) decided differently, {data.summary.only_a + data.summary.only_b} ran in only one.</>
+          {' '}(step {(data.steps.findIndex((s) => s.key === data.first_divergence)) + 1} of {data.steps.length}); {plural(data.summary.different, 'step')} decided differently, {data.summary.only_a + data.summary.only_b} ran in only one.</>
           : 'Every step made the same decision.'}
         {' '}{changedAgents.length ? <>Agents whose finding changed: <b>{changedAgents.map((a) => agentName(a.agent, a.name)).join(', ')}</b>.</> : 'No agent changed its finding.'}
       </div>
@@ -372,7 +491,7 @@ export function CompareView({ data, colorOf }) {
                 <p className="font-medium text-ink">{agentName(g.agent, g.name)}</p>
                 <p className="text-muted">{g.state === 'same' ? 'same final finding' : g.state === 'different' ? 'final finding changed' : 'ran in one only'}
                   {g.confidence_delta ? `, conf. ${g.confidence_delta > 0 ? '+' : ''}${Math.round(g.confidence_delta * 100)} pts` : ''}</p>
-                {g.changed_steps.length > 0 && <p className="text-[11px] text-muted">changed at {g.changed_steps.length} step(s)</p>}
+                {g.changed_steps.length > 0 && <p className="text-[11px] text-muted">changed at {plural(g.changed_steps.length, 'step')}</p>}
               </div>
               {[g.a, g.b].map((x, i) => (
                 <div key={i} className={cx('rounded-md border px-2.5 py-1.5 text-[12px]', g.state === 'same' ? 'border-line' : 'border-warning-500 bg-warning-50/60')}>
@@ -399,23 +518,37 @@ const VERDICT_TITLE = {
   stable: (v) => `Stable under ${v.tested} small disturbances`, sensitive: () => 'Same diagnosis, but shaky',
   fragile: () => 'Fragile — small changes give a different diagnosis', incomplete: () => 'Robustness check still running',
 }
-export function VerdictBanner({ verdict, caveats, compact }) {
+export function NotesList({ notes }) {
+  if (!notes?.length) return null
+  const tone = { high: 'text-danger-700', medium: 'text-warning-700', info: 'text-muted' }
+  return (
+    <ul className="mt-1 space-y-0.5 text-[12px] text-ink">
+      {notes.map((n) => <li key={n.id + n.text} className="flex gap-1.5"><AlertTriangle size={12} className={cx('mt-0.5 shrink-0', tone[n.severity] || 'text-muted')} aria-hidden /><span>{n.text}</span></li>)}
+    </ul>
+  )
+}
+
+export function VerdictBanner({ verdict, caveats, compact, notes }) {
   if (!verdict) return null
   const tone = { stable: 'text-success-700', sensitive: 'text-warning-700', fragile: 'text-danger-700', incomplete: 'text-muted' }[verdict.level]
+  const autoFlip = verdict.level !== 'incomplete' ? (verdict.auto_approved_flips || []).length : 0
   return (
-    <div className={cx('rounded-lg border px-3 py-2', VERDICT_STYLE[verdict.level])}>
-      <p className={cx('font-semibold', tone, compact ? 'text-[12.5px]' : 'text-[13.5px]')}>{VERDICT_TITLE[verdict.level]?.(verdict)}</p>
+    <div className={cx('rounded-lg border px-3 py-2', VERDICT_STYLE[autoFlip ? 'fragile' : verdict.level])}>
+      <p className={cx('font-semibold', autoFlip ? 'text-danger-700' : tone, compact ? 'text-[12.5px]' : 'text-[13.5px]')}>
+        {autoFlip ? `Answer can change — and ${autoFlip === 1 ? 'one change was' : `${autoFlip} changes were`} auto-approved` : VERDICT_TITLE[verdict.level]?.(verdict)}</p>
       <p className="text-[12.5px] leading-snug text-ink">{verdict.text}</p>
       {verdict.level !== 'incomplete' && (
         <p className="mt-1 text-[11.5px] text-muted">
           Tested: each reading ± its typical sensor error, all readings shifted together, and the top cited evidence records left out ({verdict.tested} runs{verdict.failed ? `, ${verdict.failed} failed` : ''}).
-          {verdict.confidence_range && ` Confidence across them: ${pct(verdict.confidence_range[0])}–${pct(verdict.confidence_range[1])}.`}
+          {verdict.confidence_text ? ` ${verdict.confidence_text[0].toUpperCase()}${verdict.confidence_text.slice(1)}.` : verdict.confidence_range && ` Confidence across them: ${pct(verdict.confidence_range[0])}–${pct(verdict.confidence_range[1])}.`}
           {verdict.baseline_margin != null && ` Lead over the runner-up: ${verdict.baseline_margin.toFixed(2)} (score points).`}
         </p>
       )}
       {verdict.nearest_flips?.length > 0 && (
-        <p className="mt-1 text-[12px] text-ink"><b>Nearest change of diagnosis</b> (wider sweep on out-of-range readings): {verdict.nearest_flips.map((f) => `${f.label} → ${f.answer}`).join('; ')}.</p>
+        <p className="mt-1 text-[12px] text-ink"><b>Nearest change of diagnosis</b> (larger changes, ±20–40%, to out-of-range readings): {verdict.nearest_flips.map((f) => `${f.label} → ${f.answer}`).join('; ')}.</p>
       )}
+      {verdict.level !== 'incomplete' && <NotesList notes={notes} />}
+      {verdict.rederived && <p className="mt-1 text-[11px] text-muted">Verdict re-derived with the current rules; the one recorded when the check finished is kept for audit.</p>}
       {verdict.level !== 'incomplete' && <p className="mt-1 text-[11.5px] text-muted">These are limits of the model and its knowledge base, not equipment limits.</p>}
       {caveats?.length > 0 && (
         <details className="mt-1 text-[11.5px] text-muted"><summary className="cursor-pointer">{caveats.length} caveats</summary>

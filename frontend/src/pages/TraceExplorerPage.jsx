@@ -210,7 +210,7 @@ export default function TraceExplorerPage() {
             </section>
 
             <section>
-              <div role="tablist" aria-label="Trace views" className="flex gap-5 border-b border-line overflow-x-auto">
+              <div role="tablist" aria-label="Trace views" className="flex flex-wrap gap-x-5 border-b border-line">
                 {TABS.map(([id, label]) => (
                   <button key={id} role="tab" type="button" aria-selected={tab === id} onClick={() => setTab(id)}
                     className={cx('relative whitespace-nowrap py-2 text-[13px] focus-ring rounded-sm', tab === id ? 'font-semibold text-ink after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:bg-ink' : 'text-muted hover:text-ink')}>
@@ -231,7 +231,7 @@ export default function TraceExplorerPage() {
                   </div>
                 )}
                 {tab === 'steps' && insights && <StepBreakdown data={insights} focus={focusStep} />}
-                {tab === 'signals' && insights && <SignalsPanel signals={insights.signals} onGoToStep={(k) => { setFocusStep(k); setTab('steps') }} />}
+                {tab === 'signals' && insights && <SignalsPanel signals={insights.signals} steps={insights.steps} onGoToStep={(k) => { setFocusStep(k); setTab('steps') }} />}
                 {tab === 'compare' && insights !== undefined && (
                   <div className="space-y-4">
                     <TracePicker current={t} onCompare={setCompareIds} />

@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { AlertTriangle, Flag, Info, Loader2, OctagonAlert } from 'lucide-react'
 import { cx } from '../ui'
 import { ReviewDecision } from '../primitives'
-import { AnswerChip, stepName, useAnswerColors } from '../lab/LabViews'
+import { AnswerChip, numberedName, stepName, useAnswerColors } from '../lab/LabViews'
 import { compareTraces, listTraces } from '../../services/api'
 
 /*
@@ -20,19 +20,20 @@ const SEV = {
 }
 
 /** Rule-based signals a reviewer should look at. */
-export function SignalsPanel({ signals, onGoToStep }) {
+export function SignalsPanel({ signals, onGoToStep, steps }) {
+  const num = Object.fromEntries((steps || []).map((s) => [s.key, s.position + 1]))
   if (!signals?.length) return <p className="text-[13px] text-muted">No signals: nothing in this trace tripped a check.</p>
   const gaps = signals.filter((s) => s.kind === 'gap')
   const rest = signals.filter((s) => s.kind !== 'gap')
   return (
     <div className="space-y-4">
-      {gaps.length > 0 && <div><h3 className="mb-1.5 text-[13px] font-semibold text-ink">Gaps — things that should have happened and did not</h3><SignalList items={gaps} onGoToStep={onGoToStep} /></div>}
-      {rest.length > 0 && <div><h3 className="mb-1.5 text-[13px] font-semibold text-ink">Signals</h3><SignalList items={rest} onGoToStep={onGoToStep} /></div>}
+      {gaps.length > 0 && <div><h3 className="mb-1.5 text-[13px] font-semibold text-ink">Gaps — things that should have happened and did not</h3><SignalList items={gaps} onGoToStep={onGoToStep} num={num} /></div>}
+      {rest.length > 0 && <div><h3 className="mb-1.5 text-[13px] font-semibold text-ink">Signals</h3><SignalList items={rest} onGoToStep={onGoToStep} num={num} /></div>}
     </div>
   )
 }
 
-function SignalList({ items, onGoToStep }) {
+function SignalList({ items, onGoToStep, num = {} }) {
   return (
     <ul className="grid gap-2 lg:grid-cols-2">
       {items.map((s) => {
@@ -42,7 +43,7 @@ function SignalList({ items, onGoToStep }) {
             <p className={cx('flex items-center gap-1.5 text-[13px] font-semibold', tone)}><Icon size={14} aria-hidden />{s.title}
               <span className="ml-auto text-[10.5px] font-medium uppercase tracking-wide opacity-80">{s.severity}</span></p>
             <p className="mt-0.5 text-[12.5px] leading-snug text-ink">{s.detail}</p>
-            {s.step && <button type="button" onClick={() => onGoToStep(s.step)} className="mt-1 text-[12px] font-medium text-primary-700 underline underline-offset-2">Show step: {stepName({ key: s.step })}</button>}
+            {s.step && <button type="button" onClick={() => onGoToStep(s.step)} className="mt-1 text-[12px] font-medium text-primary-700 underline underline-offset-2">Show step: {numberedName({ key: s.step }, num[s.step])}</button>}
           </li>
         )
       })}
@@ -61,7 +62,7 @@ export function StepBreakdown({ data, focus }) {
     <div>
       <div className="flex gap-px" aria-label="Step ribbon">
         {data.steps.map((s) => (
-          <a key={s.key} href={`#step-${s.key}`} title={`${stepName(s)}: ${s.signature}`}
+          <a key={s.key} href={`#step-${s.key}`} title={`${numberedName(s, s.position + 1)}: ${s.signature}`}
             className={cx('h-5 min-w-[6px] flex-1 rounded-[2px]', STATUS_CELL[s.status] || 'bg-slate-300', flagged.has(s.key) && 'ring-2 ring-ink ring-offset-1 ring-offset-canvas')} />
         ))}
       </div>
@@ -80,7 +81,7 @@ export function StepBreakdown({ data, focus }) {
           const sigs = sigFor(s.key)
           return (
             <li key={s.key} id={`step-${s.key}`} className={cx('grid gap-x-3 px-3 py-2 sm:grid-cols-[28px_220px_minmax(0,1fr)_60px]', focus === s.key && 'bg-primary-50')}>
-              <span className="text-[11.5px] tabular-nums text-slate-400">{s.position + 1}</span>
+              <span className="text-[11.5px] tabular-nums text-slate-400">{s.position + 1}.</span>
               <span className="text-[12.5px] font-medium text-ink">
                 {s.key === data.first_problem_step && <Flag size={12} className="mr-1 inline text-danger-600" aria-label="First problem" />}
                 <span className={cx('mr-1.5 inline-block h-2 w-2 rounded-full', STATUS_CELL[s.status] || 'bg-slate-300')} aria-hidden />{stepName(s)}

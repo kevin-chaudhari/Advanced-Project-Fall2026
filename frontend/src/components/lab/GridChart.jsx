@@ -13,6 +13,7 @@ const shade = (t) => `rgba(110,90,62,${0.12 + 0.78 * Math.max(0, Math.min(1, t))
 
 export default function GridChart({ grid, colorOf, onOpenRun }) {
   const [by, setBy] = useState('answer')
+  const [pick, setPick] = useState(null)   // {cell, x, y}
   if (!grid) return null
   const rows = [...grid.rows].map((r, j) => ({ r, y: grid.y_values[j] })).reverse()   // highest Y on top
   const margins = grid.rows.flat().filter((c) => c?.margin != null).map((c) => c.margin)
@@ -53,9 +54,9 @@ export default function GridChart({ grid, colorOf, onOpenRun }) {
                 const right = differs(c, r[i + 1])
                 const below = differs(c, rows[j + 1]?.r[i])
                 return (
-                  <button key={i} type="button" disabled={!c} onClick={() => c && onOpenRun?.(c.run_index)}
+                  <button key={i} type="button" disabled={!c} onClick={() => c && setPick({ c, x: grid.x_values[i], y })}
                     title={c ? `${grid.x_label} ${fmt(grid.x_values[i])} · ${grid.y_label} ${fmt(y)} → ${c.answer}, ${pct(c.confidence)}, lead ${c.margin?.toFixed(2) ?? '—'}, ${c.review_decision === 'AUTO_RESOLVE' ? 'auto-resolve' : 'human review'}${c.is_baseline ? ' (baseline)' : ''}` : 'not run'}
-                    className={cx('relative h-14 border border-surface text-left focus-ring', c?.is_baseline && 'z-10 outline outline-[3px] -outline-offset-[3px] outline-ink')}
+                    className={cx('relative h-14 border border-surface text-left focus-ring', pick?.c === c && c && 'ring-2 ring-primary-500 ring-inset', c?.is_baseline && 'z-10 outline outline-[3px] -outline-offset-[3px] outline-ink')}
                     style={{ background: fill(c), borderRightWidth: right ? 3 : 1, borderRightColor: right ? '#17140F' : undefined, borderBottomWidth: below ? 3 : 1, borderBottomColor: below ? '#17140F' : undefined }}>
                     {c && <span className={cx('absolute inset-x-1 bottom-0.5 truncate text-[10.5px] leading-tight', dark(c) ? 'text-surface' : 'text-ink')}>
                       {by === 'answer' ? c.answer : by === 'confidence' ? pct(c.confidence) : by === 'margin' ? (c.margin?.toFixed(2) ?? '—') : (c.review_decision === 'AUTO_RESOLVE' ? 'auto' : 'review')}
@@ -76,8 +77,28 @@ export default function GridChart({ grid, colorOf, onOpenRun }) {
         {by === 'answer' && grid.answers.map((a) => <span key={a} className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm" style={{ background: colorOf(a) }} />{a}</span>)}
         <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 outline outline-2 outline-ink" />baseline</span>
         <span className="inline-flex items-center gap-1.5"><span className="h-3 w-1 bg-ink" />diagnosis changes across this edge</span>
-        <span>Click a cell to compare that run with the baseline.</span>
+        <span>Click a cell for details.</span>
       </div>
+      {pick && <RunCard run={pick.c} label={`${grid.x_label} ${fmt(pick.x)} · ${grid.y_label} ${fmt(pick.y)}${pick.c.is_baseline ? ' (baseline)' : ''}`} colorOf={colorOf}
+        baseIndex={grid.rows.flat().find((c) => c?.is_baseline)?.run_index} onCompare={(i) => onOpenRun?.(i)} onClose={() => setPick(null)} />}
+    </div>
+  )
+}
+
+export function RunCard({ run, label, colorOf, onCompare, onClose, baseIndex }) {
+  if (!run) return null
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-ink/30 bg-surface px-3 py-2 text-[12.5px]">
+      <span className="font-medium text-ink">{label}</span>
+      <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm" style={{ background: colorOf(run.answer) }} />{run.answer}</span>
+      <span className="tabular-nums text-muted">{run.confidence == null ? '—' : `${Math.round(run.confidence * 100)}%`}</span>
+      <span className="text-muted">{run.review_decision === 'AUTO_RESOLVE' ? 'auto-resolve' : 'human review'}</span>
+      {run.margin != null && <span className="text-muted">lead {run.margin.toFixed(2)}</span>}
+      <span className="ml-auto flex items-center gap-2">
+        {run.run_index !== baseIndex && <button type="button" onClick={() => onCompare(run.run_index)} className="btn-primary py-1 text-[12px]">Compare with baseline</button>}
+        {run.trace_id && <a href={`/traces/${run.trace_id}`} className="font-medium text-primary-700 underline underline-offset-2">Open trace</a>}
+        <button type="button" onClick={onClose} aria-label="Close" className="text-muted hover:text-ink">✕</button>
+      </span>
     </div>
   )
 }
