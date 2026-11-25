@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, FlaskConical, Loader2, Play, Plus, RefreshCw, Square, Trash2 } from 'lucide-react'
 import { cx } from '../components/ui'
 import { ReviewDecision } from '../components/primitives'
-import { AgentMatrix, AnswerChip, ReadingsStrip, VerdictBanner, CompareView, FactorSweeps, RunsTable, StepDivergence, StepRibbons, useAnswerColors } from '../components/lab/LabViews'
+import { AgentMatrix, AnswerChip, NotesList, ReadingsStrip, VerdictBanner, CompareView, FactorSweeps, RunsTable, StepDivergence, StepRibbons, useAnswerColors } from '../components/lab/LabViews'
 import { useDiagnostics, DATASETS } from '../state/DiagnosticsContext'
 import { MultiCompare } from '../components/trace/InsightPanels'
 import ResponseChart from '../components/lab/ResponseChart'
@@ -366,6 +366,21 @@ function ExperimentView({ id, onChanged }) {
     update({ view: 'runs', ...(base && base.run_index !== i ? { sel: [base.run_index, i].join(',') } : {}) })
   }
 
+  // "Find the exact point": a new sweep of one sensor with values strictly between two tried values
+  const refine = async (f, t, values) => {
+    const lo = Math.min(t.from_value, t.to_value), hi = Math.max(t.from_value, t.to_value)
+    const fmt = (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 3, useGrouping: false })
+    try {
+      const r = await createExperiment({
+        name: `Refine ${f.label.toLowerCase()} ${fmt(lo)}–${fmt(hi)}`, kind: 'sensor_sweep', question: exp.spec.question,
+        dataset_type: exp.spec.dataset_type, data_mode: exp.spec.data_mode, top_k: exp.spec.top_k ?? 8,
+        factors: { [f.factor]: values }, source_trace_id: exp.source_trace_id || undefined,
+      })
+      onChanged?.()
+      nav(`/lab/${r.experiment_id}`)
+    } catch (e) { setError(errText(e)) }
+  }
+
   if (error && !exp) return <div role="alert" className="m-6 flex items-center gap-2 rounded-lg border border-danger-100 bg-danger-50 px-4 py-2.5 text-[13px] text-danger-700"><AlertTriangle size={15} />{error}</div>
   if (!exp) return <p className="p-6 text-[13px] text-muted flex items-center gap-2"><Loader2 size={14} className="animate-spin" />Loading experiment…</p>
 
@@ -404,11 +419,13 @@ function ExperimentView({ id, onChanged }) {
           </span>
         </div>
         {exp.error && <p className="mt-2 text-[12.5px] text-danger-700">{exp.error}</p>}
+        {error && <p role="alert" className="mt-2 text-[12.5px] text-danger-700">{error}</p>}
       </header>
 
       {!a.ready ? <p className="text-[13px] text-muted flex items-center gap-2"><Loader2 size={14} className="animate-spin" />Waiting for the first run…</p> : (
         <>
-          {(exp.verdict || a.verdict) && <VerdictBanner verdict={exp.verdict || a.verdict} caveats={a.caveats} />}
+          {(exp.verdict || a.verdict) && <VerdictBanner verdict={exp.verdict || a.verdict} caveats={a.caveats} notes={a.notes} />}
+          {!(exp.verdict || a.verdict) && a.notes?.length > 0 && <div className="rounded-lg border border-warning-100 bg-warning-50 px-3 py-2"><NotesList notes={a.notes} /></div>}
           <section className="flex flex-wrap items-stretch gap-x-6 gap-y-2 rounded-lg border border-line bg-surface px-4 py-2.5 text-[12.5px]">
             <div className="min-w-0">
               <p className="eyebrow">Baseline</p>
@@ -445,11 +462,11 @@ function ExperimentView({ id, onChanged }) {
             <div className="mb-5 rounded-xl border border-line bg-surface p-3"><p className="mb-2 text-[13px] font-semibold text-ink">Response chart</p>
               <ResponseChart exp={exp} colorOf={colorOf} onOpenRun={openRun} onCompare={(ids) => update({ sel: ids.join(','), view: 'runs' })} /></div>
             <p className="mb-3 text-[12px] text-muted">Each value tried, in order; colour = the diagnosis it produced, a vertical line = the answer changes. Click a value to compare it with the baseline.</p>
-            <FactorSweeps factors={a.factors} colorOf={colorOf} onOpenRun={openRun} /></>}
-          {a.ready && view === 'steps' && <><p className="mb-2 text-[12px] text-muted">Steps matched across runs by what they are. “Linked to the answer” = runs that decided the same here mostly reached the same diagnosis; the flag marks the first such step.</p>
+            <FactorSweeps factors={a.factors} colorOf={colorOf} onOpenRun={openRun} onRefine={refine} baselineAnswer={a.baseline?.answer} /></>}
+          {a.ready && view === 'steps' && <><p className="mb-2 text-[12px] text-muted">Steps matched across runs by what they are. Numbers are the order the steps ran in the baseline (steps the baseline never ran continue the count). “Linked to the answer” = runs that decided the same here mostly reached the same diagnosis; the flag marks the first such step.</p>
             <StepDivergence steps={a.step_divergence} firstKey={a.first_divergent_step} colorOf={colorOf} total={a.completed_runs} /></>}
-          {a.ready && view === 'agents' && <AgentMatrix agents={a.agents} runs={exp.runs} colorOf={colorOf} onPick={openRun} />}
-          {a.ready && view === 'ribbons' && <StepRibbons runs={reps} divergence={a.step_divergence} colorOf={colorOf} />}
+          {a.ready && view === 'agents' && <AgentMatrix agents={a.agents} runs={exp.runs} colorOf={colorOf} onPick={openRun} stepNumbers={a.step_numbers} />}
+          {a.ready && view === 'ribbons' && <StepRibbons runs={reps} allRuns={a.ribbon_runs} divergence={a.step_divergence} colorOf={colorOf} />}
           {view === 'runs' && (
             <div className="space-y-4">
               <div><p className="mb-2 text-[12px] text-muted">Tick runs to compare (2–8).</p>

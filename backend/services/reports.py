@@ -122,11 +122,20 @@ def fleet(origin: str = "live", dataset: Optional[str] = None, limit: int = 500)
         return {"total": 0}
     review = sum(1 for r in rows if r["review_decision"] == "REQUIRES_HUMAN_REVIEW")
 
+    # one name per answer: labels differing only in case or spacing ("Bearing Wear" / "bearing wear") are one answer,
+    # shown in its most common spelling (capitalised spellings win ties). No synonym mapping.
+    _key = lambda a: " ".join(str(a or "Unknown").split()).lower()  # noqa: E731
+    spellings: Dict[str, Counter] = defaultdict(Counter)
+    for r in rows:
+        spellings[_key(r["final_label"])][" ".join(str(r["final_label"] or "Unknown").split())] += 1
+    display = {k: max(c, key=lambda x: (c[x], x != x.lower(), x)) for k, c in spellings.items()}
+    name = lambda a: display.get(_key(a), " ".join(str(a or "Unknown").split()))  # noqa: E731
+
     by_answer: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"count": 0, "review": 0, "conf": [], "margin": []})
     by_day: Dict[str, Counter] = defaultdict(Counter)
     hist = Counter()
     for r in rows:
-        a = by_answer[r["final_label"] or "Unknown"]
+        a = by_answer[name(r["final_label"])]
         a["count"] += 1
         a["review"] += r["review_decision"] == "REQUIRES_HUMAN_REVIEW"
         if r["final_confidence"] is not None:
@@ -142,7 +151,7 @@ def fleet(origin: str = "live", dataset: Optional[str] = None, limit: int = 500)
         if not snap:
             continue
         with_snap += 1
-        ans = snap.get("answer") or "Unknown"
+        ans = name(snap.get("answer"))
         if snap.get("margin") is not None:
             by_answer[ans]["margin"].append(snap["margin"])
             scatter.append({"trace_id": r["trace_id"], "confidence": snap.get("confidence"), "margin": snap["margin"],
@@ -150,7 +159,8 @@ def fleet(origin: str = "live", dataset: Optional[str] = None, limit: int = 500)
         for g in ti.signals(snap):
             sig_count[g["id"]] += 1
             heat[ans][g["id"]] += 1
-            titles[g["id"]] = {"title": g["title"], "severity": g["severity"], "kind": g.get("kind", "signal")}
+            titles[g["id"]] = {"title": g["title"], "severity": g["severity"], "kind": g.get("kind", "signal"),
+                               "fleet_title": g.get("fleet_title")}
 
     with ex._conn() as c:
         rv = Counter(dict(c.execute("SELECT decision, COUNT(*) FROM reviews GROUP BY decision").fetchall()))
@@ -159,6 +169,8 @@ def fleet(origin: str = "live", dataset: Optional[str] = None, limit: int = 500)
                                "AND COALESCE(deleted,0)=0").fetchall():
             verdicts[json.loads(vj).get("level")] += 1
 
+    # gaps (things that should have happened and did not) first, then by how often they fire
+    sig_order = sorted(sig_count.most_common(), key=lambda kv: (titles[kv[0]]["kind"] != "gap", -kv[1]))
     avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None  # noqa: E731
     answers = sorted(by_answer, key=lambda k: -by_answer[k]["count"])
     return {
@@ -167,9 +179,12 @@ def fleet(origin: str = "live", dataset: Optional[str] = None, limit: int = 500)
         "avg_confidence": avg([r["final_confidence"] for r in rows if r["final_confidence"] is not None]),
         "by_answer": [{"answer": k, "count": by_answer[k]["count"], "review_rate": round(by_answer[k]["review"] / by_answer[k]["count"], 3),
                        "avg_confidence": avg(by_answer[k]["conf"]), "avg_margin": avg(by_answer[k]["margin"])} for k in answers],
-        "signals": [{"id": k, **titles[k], "count": v, "rate": round(v / with_snap, 3) if with_snap else 0}
-                    for k, v in sig_count.most_common()],
-        "heatmap": {"answers": [a for a in answers if a in heat], "signals": [k for k, _ in sig_count.most_common()],
+        "signals": [{"id": k, **{x: y for x, y in titles[k].items() if x != "fleet_title"},
+                     "title": (titles[k]["fleet_title"] or titles[k]["title"]).replace("{n}", str(v)),
+                     "count": v, "of": with_snap, "rate": round(v / with_snap, 3) if with_snap else 0}
+                    for k, v in sig_order],
+        "heatmap": {"answers": [a for a in answers if a in heat], "signals": [k for k, _ in sig_order],
+                    "labels": {k: titles[k]["fleet_title"] or titles[k]["title"] for k in titles},
                     "cells": {a: dict(heat[a]) for a in heat}, "answer_counts": {a: by_answer[a]["count"] for a in answers}},
         "scatter": scatter, "confidence_hist": [{"bin": f"{i * 10}–{i * 10 + 10}%", "count": hist[i]} for i in range(10)],
         "by_day": [{"day": d, "auto": by_day[d]["auto"], "review": by_day[d]["review"]} for d in sorted(by_day)],

@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { cx } from '../ui'
+import { RunCard } from './GridChart'
 
 /*
  * Response chart — Agent-Viz's "response curve" (factor value → final diagnosis as a step line),
@@ -48,6 +49,7 @@ export default function ResponseChart({ exp, colorOf, onOpenRun, onCompare }) {
   const [colorBy, setColorBy] = useState('answer')
   const [showBand, setShowBand] = useState(true)
   const [showGate, setShowGate] = useState(true)
+  const [pick, setPick] = useState(null)
   const metric = Y_METRICS[yKey]
   const overlay = xKey === '__all'
 
@@ -155,7 +157,7 @@ export default function ResponseChart({ exp, colorOf, onOpenRun, onCompare }) {
           {transitions.map(({ a, b }) => { const mx = (x(a.x) + x(b.x)) / 2; return <g key={`${a.x}-${b.x}`}><line x1={mx} x2={mx} y1={T - 8} y2={B} stroke="#17140F" strokeDasharray="3 3" /><text x={mx} y={T - 12} textAnchor="middle" fontSize="10.5" fill="#17140F">answer changes</text></g> })}
           {series.map((s) => <path key={s.factor} d={linePath(s)} fill="none" stroke={overlay ? s.color : '#4A453D'} strokeWidth="2" strokeOpacity={overlay ? 0.9 : 0.55} />)}
           {series.map((s) => s.points.map((p) => (
-            <g key={`${s.factor}-${p.run.run_index}-${p.x}`} onClick={() => onOpenRun?.(p.run.run_index)} style={{ cursor: 'pointer' }}>
+            <g key={`${s.factor}-${p.run.run_index}-${p.x}`} onClick={() => setPick({ run: { ...p.run, margin: p.run.outcome?.margin }, label: `${SENSOR_LABEL[s.factor] || s.factor} ${fmtX(p.raw)}${p.isBase ? ' (baseline)' : ''}` })} style={{ cursor: 'pointer' }}>
               <circle cx={x(p.x)} cy={y(p.y)} r={p.isBase ? 8 : 6} fill={pointColor(p, s)} stroke={p.isBase ? '#17140F' : '#FFFCF5'} strokeWidth={p.isBase ? 2.5 : 1.5}>
                 <title>{`${SENSOR_LABEL[s.factor] || s.factor} ${fmtX(p.raw)}${p.isBase ? ' (baseline)' : ''} → ${p.run.answer}, ${Math.round((p.run.confidence || 0) * 100)}%, ${p.run.review_decision === 'AUTO_RESOLVE' ? 'auto-resolve' : 'human review'}`}</title>
               </circle>
@@ -170,9 +172,10 @@ export default function ResponseChart({ exp, colorOf, onOpenRun, onCompare }) {
       <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-muted">
         {overlay && series.map((s) => <span key={s.factor} className="inline-flex items-center gap-1.5"><span className="h-0.5 w-4" style={{ background: s.color }} />{SENSOR_LABEL[s.factor]}</span>)}
         <span className="inline-flex items-center gap-1.5"><span className="h-3 w-3 rounded-full border-2 border-ink" />baseline</span>
-        <span>Click a point to compare that run with the baseline.</span>
+        <span>Click a point for details.</span>
       </div>
 
+      {pick && <RunCard run={pick.run} label={pick.label} colorOf={colorOf} baseIndex={base?.run_index} onCompare={(i) => onOpenRun?.(i)} onClose={() => setPick(null)} />}
       {transitions.length > 0 && (
         <ul className="mt-2 flex flex-wrap gap-2">
           {transitions.map(({ a, b }) => (

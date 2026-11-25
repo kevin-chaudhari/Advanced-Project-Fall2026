@@ -70,7 +70,11 @@ def store_snapshot(question: str, result: Dict[str, Any], top_k: int) -> None:
 def get_snapshot(trace_id: str) -> Optional[Dict[str, Any]]:
     with ex._conn() as c:
         row = c.execute("SELECT snapshot_json FROM trace_snapshots WHERE trace_id=?", (trace_id,)).fetchone()
-    return json.loads(row["snapshot_json"]) if row else None
+    if not row:
+        return None
+    snap = json.loads(row["snapshot_json"])
+    ex.plain_steps(snap.get("steps") or [])
+    return snap
 
 
 # ─── Signals ─────────────────────────────────────────────────────────────────
@@ -94,8 +98,18 @@ STAGE_LABEL = {"query_prep": "reading the question", "initial_rag": "evidence re
                "review_gate": "review gate"}
 
 
-def _first_step(snap: Dict[str, Any], stage: str) -> Optional[str]:
-    return next((s["key"] for s in snap.get("steps") or [] if s["stage"] == stage), None)
+def _first_step(snap: Dict[str, Any], stage: str, agent: Optional[str] = None) -> Optional[str]:
+    """First step of a stage; with ``agent``, that agent's step in the stage (else the agent's first step anywhere)."""
+    steps = snap.get("steps") or []
+    if agent:
+        return (next((s["key"] for s in steps if s["stage"] == stage and s.get("agent") == agent), None)
+                or next((s["key"] for s in steps if s.get("agent") == agent), None))
+    return next((s["key"] for s in steps if s["stage"] == stage), None)
+
+
+def _n(n: Any, word: str, plural: Optional[str] = None) -> str:
+    """'1 agent', '3 agents' — a proper plural instead of 'agent(s)'."""
+    return f"{n} {word if n == 1 else (plural or word + 's')}"
 
 
 def signals(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -103,8 +117,12 @@ def signals(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     summ = _trace_summary(snap["trace_id"])
 
-    def add(sid, severity, title, detail, step=None, kind="signal"):
-        out.append({"id": sid, "severity": severity, "title": title, "detail": detail, "step": step, "kind": kind})
+    def add(sid, severity, title, detail, step=None, kind="signal", **extra):
+        out.append({"id": sid, "severity": severity, "title": title, "detail": detail, "step": step, "kind": kind, **extra})
+
+    chk = ex.second_check(snap.get("steps") or [], snap.get("feedback_rounds"), snap.get("review_decision"), snap.get("council"))
+    src = chk["sources"]
+    src_txt = " / ".join(f"{src[k]} {k}" for k in ("real", "synthetic") if k in src) if src else ""
 
     failed = [c for c in snap.get("review_criteria") or [] if not c.get("passed")]
     if snap.get("review_decision") == "REQUIRES_HUMAN_REVIEW":
@@ -118,18 +136,20 @@ def signals(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"{runner} is only {m:.2f} behind {snap.get('answer')} — a small change in the input could swap them.",
             _first_step(snap, "numerical_analysis"))
     agents = snap.get("agents") or {}
-    dissent = [v["name"] for k, v in agents.items() if k not in ("ambiguity",) and v.get("finding") and v["finding"] != snap.get("answer")]
+    dissent_keys = [k for k, v in agents.items() if k not in ("ambiguity",) and v.get("finding") and v["finding"] != snap.get("answer")]
+    dissent = [agents[k]["name"] for k in dissent_keys]
     if dissent:
-        add("agents_dissent", "medium", f"{len(dissent)} agent(s) ended on a different finding",
-            f"{', '.join(dissent)} did not agree with the final answer.", _first_step(snap, "phase1"))
+        add("agents_dissent", "medium", f"{_n(len(dissent), 'agent')} ended on a different finding",
+            f"{', '.join(dissent)} did not agree with the final answer.", _first_step(snap, "phase1", dissent_keys[0]))
     unresolved = summ.get("unresolved_disagreements") or 0
     if unresolved:
         add("unresolved_disagreement", "medium", "Disagreements left open",
-            f"{unresolved} challenge(s) or question(s) between agents were never settled.", _first_step(snap, "council"))
+            f"{_n(unresolved, 'challenge or question', 'challenges or questions')} between agents {'was' if unresolved == 1 else 'were'} never settled.", _first_step(snap, "council"))
     comp = snap.get("evidence_composition") or {}
     if comp and not comp.get("real") and comp.get("synthetic"):
-        add("synthetic_only", "medium", "Only synthetic evidence",
-            f"All {comp.get('synthetic')} evidence records are synthetic; no real historical case supports this answer.",
+        add("synthetic_only", "high" if chk["auto_no_check"] else "medium", "Only synthetic evidence",
+            f"All {_n(comp.get('synthetic'), 'evidence record')} {'is' if comp.get('synthetic') == 1 else 'are'} synthetic; no real historical case supports this answer"
+            + (", and it was auto-approved without a second check." if chk["auto_no_check"] else "."),
             _first_step(snap, "initial_rag"))
     unc = snap.get("uncited_evidence") or []
     ev_n = len(snap.get("evidence") or [])
@@ -145,17 +165,22 @@ def signals(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
     if snap.get("missing_sensors"):
         add("missing_sensors", "medium", "Sensors reported missing", ", ".join(snap["missing_sensors"]), _first_step(snap, "query_prep"))
     if summ.get("failed_executions"):
-        add("agent_failed", "high", "An agent failed", f"{summ['failed_executions']} agent execution(s) raised an error.")
+        add("agent_failed", "high", "An agent failed", f"{_n(summ['failed_executions'], 'agent execution')} raised an error.")
     errored = [s for s in snap.get("steps") or [] if s.get("status") == "error"]
     if errored:
         add("step_error", "high", "A pipeline step errored", f"{errored[0]['stage']}: {errored[0]['reason'][:160]}", errored[0]["key"])
     cv = snap.get("claim_validation") or {}
     if (cv.get("removed") or 0) > 0:
         add("claims_removed", "medium", "Unsupported claims removed",
-            f"{cv['removed']} claim(s) in the agents' text were not backed by evidence and were removed.", _first_step(snap, "claim_validation"))
+            f"{_n(cv['removed'], 'claim')} in the agents' text {'was' if cv['removed'] == 1 else 'were'} not backed by evidence and removed.", _first_step(snap, "claim_validation"))
     if (snap.get("feedback_rounds") or 0) > 0:
         add("feedback_loop", "info", "Needed extra evidence",
-            f"The evidence check sent the agents back {snap['feedback_rounds']} time(s) for targeted retrieval.", _first_step(snap, "targeted_rag"))
+            f"The evidence check sent the agents back {_n(snap['feedback_rounds'], 'time')} for targeted retrieval"
+            + (f"; the extra search found {src_txt} records." if src_txt else "."), _first_step(snap, "targeted_rag"))
+    if chk["synthetic_only"]:
+        add("double_check_synthetic", "medium", "Double-check found only synthetic evidence",
+            (f"The extra evidence search found {src_txt} records" if src_txt else "The extra evidence search found only synthetic records")
+            + ": no real historical case backs the re-check.", _first_step(snap, "targeted_rag"))
     c = snap.get("council") or {}
     if c.get("convened") and c.get("confidence_before") is not None and c.get("confidence_after") is not None \
             and c["confidence_after"] < c["confidence_before"] - 0.05:
@@ -180,6 +205,13 @@ def signals(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
     if conflict and auto:
         add("conflict_ignored", "high", "Conflict flagged, answer auto-resolved",
             "The evidence check reported conflicting hypotheses, yet the case passed the review gate.", conflict[-1]["key"], kind="gap")
+    if chk["auto_no_check"] and snap.get("steps"):
+        add("auto_no_second_check", "high", "Auto-approved without a second check",
+            "The review gate approved this answer automatically, but neither the extra evidence search nor the council "
+            "debate ran: nothing re-checked it before it was released"
+            + (f" (confidence {snap['confidence']:.0%})." if snap.get("confidence") is not None else "."),
+            _first_step(snap, "review_gate"), kind="gap",
+            fleet_title="Approved with no evidence re-check or agent debate")
     conf = snap.get("confidence")
     should_convene = (conf is not None and conf < 0.65) or (m is not None and m < 0.15) or bool(dissent)
     if should_convene and not (snap.get("council") or {}).get("convened") and "collaboration" not in stages:
